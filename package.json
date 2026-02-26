@@ -1,0 +1,33 @@
+{
+  "name": "wspass",
+  "version": "1.0.0",
+  "description": "Bootstrap repo for PASS (PRD → architecture → infra graph → IaC → scaffold → repo-first docs).",
+  "main": "index.js",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "typecheck": "turbo typecheck",
+    "lint": "turbo lint",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MatteoTanziCodes/WSPass.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/MatteoTanziCodes/WSPass/issues"
+  },
+  "homepage": "https://github.com/MatteoTanziCodes/WSPass#readme",
+  "devDependencies": {
+    "turbo": "^2.8.11"
+  }
+}
