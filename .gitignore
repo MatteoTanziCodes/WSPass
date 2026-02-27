@@ -10,3 +10,6 @@ runs/
 
 # optional future tool store
 .pass/
+
+# Ignore Turbo cache folder
+.turbo/
