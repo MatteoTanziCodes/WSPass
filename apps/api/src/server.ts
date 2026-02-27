@@ -1,13 +1,21 @@
 import Fastify from "fastify";
+import { registerRunsRoutes } from "./modules/runs/runs.routes";
 
-const app = Fastify({ logger: true });
+async function start() {
+  const app = Fastify({ logger: true });
 
-app.get("/health", async () => ({ ok: true }));
+  app.get("/health", async () => ({ ok: true }));
 
-const port = Number(process.env.PORT ?? 3001);
-const host = "0.0.0.0";
+  // Registers the minimal run-tracking API (Step 2).
+  await registerRunsRoutes(app);
 
-app.listen({ port, host }).catch((err) => {
-  app.log.error(err);
+  const port = Number(process.env.PORT ?? 3001);
+  const host = "0.0.0.0";
+
+  app.listen({ port, host });
+}
+
+start().catch((err) => {
+  console.error(err);
   process.exit(1);
 });

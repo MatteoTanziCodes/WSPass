@@ -6,7 +6,7 @@ dist
 turbo
 
 # generated run folders (per plan)
-runs/
+/runs/
 
 # optional future tool store
 .pass/
