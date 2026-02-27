@@ -9,7 +9,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "echo \"(lint later)\""
+    "lint": "echo \"(lint later)\"",
+    "validate:samples": "npm run build && node dist/schemas/validateSamples.js"
   },
   "dependencies": {
     "zod": "^4.3.6"
