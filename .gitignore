@@ -1,0 +1,15 @@
+node_modules
+dist
+.next
+.env
+.env.local
+turbo
+
+# generated run folders (per plan)
+runs/
+
+# optional future tool store
+.pass/
+
+# Ignore Turbo cache folder
+.turbo/
