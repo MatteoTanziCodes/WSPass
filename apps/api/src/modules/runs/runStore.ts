@@ -25,9 +25,9 @@ export class RunStore {
   private readonly indexPath: string;  // path to runs index file (runs/index.json)
 
   constructor(opts?: { runsDir?: string }) {
-    // Default: <repoRoot>/runs if you run the server from repo root (recommended).
-    // Override with RUNS_DIR if needed.
-    this.runsDir = opts?.runsDir ?? process.env.RUNS_DIR ?? path.resolve(process.cwd(), "runs");
+    // Default to <repoRoot>/runs even if the server is started from apps/api.
+    const defaultRunsDir = path.resolve(__dirname, "../../../../../runs");  // This resolves to <repoRoot>/runs regardless of where the server is started from.
+    this.runsDir = opts?.runsDir ?? process.env.RUNS_DIR ?? defaultRunsDir;
     this.indexPath = path.join(this.runsDir, "index.json");
   }
 
