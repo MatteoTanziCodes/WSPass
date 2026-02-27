@@ -107,14 +107,13 @@ export class RunStore {
       ...existing,
       ...patch,
       last_updated_at: now,
-      step_timestamps: { ...existing.step_timestamps },
+      step_timestamps: { ...(existing.step_timestamps ?? {}) },
     };
 
     // Only set the timestamp the first time we reach a step.
-    if (patch.current_step && !next.step_timestamps[patch.current_step]) {
-      next.step_timestamps[patch.current_step] = now;
+    if (patch.current_step) {
+      next.step_timestamps[patch.current_step] ??= now;
     }
-
     // Validate then persist the updated run.json atomically.
     const validated = RunDetailSchema.parse(next);
     await writeJsonAtomic(this.getRunPath(runId), validated);
@@ -142,7 +141,8 @@ export class RunStore {
     const artifactsDir = this.getArtifactsDir(runId);
     await ensureDir(artifactsDir);  // Ensure the artifacts directory exists
 
-    const safe = toSafeFilename(name);  // Normalize the artifact name
+    // Normalize the artifact name
+    const safe = toSafeFilename(name) || "artifact";  // Fallback if name sanitizes to empty.
     const createdAt = new Date().toISOString();
 
     let filename: string;
@@ -175,7 +175,7 @@ export class RunStore {
     const nextArtifacts = [
       ...index.artifacts.filter((a) => a.name !== name),
       meta,
-    ].sort((a, b) => (a.created_at !== b.created_at ? (a.created_at < b.created_at ? 1 : -1) : a.name.localeCompare(b.name)));
+    ].sort((a, b) => (a.created_at !== b.created_at ? (a.created_at < b.created_at ? 1 : -1) : (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)));
 
     // Persist the updated artifacts manifest atomically so the partial JSON is never seen.
     await writeJsonAtomic(this.getArtifactsIndexPath(runId), ArtifactsIndexSchema.parse({ version: 1, artifacts: nextArtifacts }));
