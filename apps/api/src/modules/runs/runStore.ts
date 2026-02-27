@@ -30,9 +30,8 @@ type UpdateRunPatch = {
   current_step?: RunRecord["current_step"];
 };
 
-// Sanitizes an artifact name into a filesystem-safe, deterministic filename base.
+// Convert artifact names into safe, deterministic filenames.
 function toSafeFilename(name: string): string {
-  // Keeps artifact filenames cross-platform safe and deterministic.
   return name.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "_");
 }
 
@@ -42,13 +41,13 @@ export class RunStore {
   private readonly indexPath: string;  // path to runs index file (runs/index.json)
 
   constructor(opts?: { runsDir?: string }) {
-    // Repo-root anchored output so location doesn't depend on where you start the server.
+    // Repo-root anchored output so the runs location doesn't depend on where the server is started.
     const defaultRunsDir = path.resolve(__dirname, "../../../../../runs");  
     this.runsDir = opts?.runsDir ?? process.env.RUNS_DIR ?? defaultRunsDir;
     this.indexPath = path.join(this.runsDir, "index.json");
   }
 
-  // Creates a new run on disk (run.json + index entry) and returns the created run record.
+  // Creates a new run + updates the run index. and returns the created run record.
   async createRun(): Promise<RunDetail> {
     await ensureDir(this.runsDir);  // Ensure runs directory exists before writing.
 
@@ -81,7 +80,7 @@ export class RunStore {
     return run;
   }
 
-  // Returns the run history from runs/index.json in deterministic (newest-first) order.
+  // Returns run history from runs/index.json (newest-first).
   async listRuns(): Promise<RunRecord[]> {
     const index = await this.readOrInitIndex();
     return sortRunsNewestFirst(index.runs);
@@ -111,8 +110,8 @@ export class RunStore {
       step_timestamps: { ...existing.step_timestamps },
     };
 
+    // Only set the timestamp the first time we reach a step.
     if (patch.current_step && !next.step_timestamps[patch.current_step]) {
-      // Only set the first time we reach a step (keeps timestamps meaningful).
       next.step_timestamps[patch.current_step] = now;
     }
 
