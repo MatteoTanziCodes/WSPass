@@ -22,6 +22,7 @@ function buildProjectRedirect(runId: string, projectKey?: string) {
 // Create a run
 export async function createRunAction(formData: FormData) {
   const prdText = String(formData.get("prd_text") ?? "").trim();
+  const orgConstraintsYaml = String(formData.get("org_constraints_yaml") ?? "").trim() || undefined;
   const repoMode = String(formData.get("repo_mode") ?? "existing").trim();
 
   if (!prdText) {
@@ -54,6 +55,7 @@ export async function createRunAction(formData: FormData) {
     prd_text: prdText,
     requested_by: "dashboard",
     repo_target: repoTarget,
+    org_constraints_yaml: orgConstraintsYaml,
   });
 
   const projectKey =

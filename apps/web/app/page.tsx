@@ -5,6 +5,7 @@ import {
   sendArchitectureFeedbackAction,
 } from "./actions";
 import { ArchitectureDiagram } from "./components/ArchitectureDiagram";
+import { DarkModeToggle } from "./components/DarkModeToggle";
 import { LiveRefreshShell } from "./components/LiveRefreshShell";
 import { listAccessibleRepositories } from "./lib/github";
 import { getArchitecturePack, getDecompositionPlan, getRun, listRuns } from "./lib/passApi";
@@ -185,6 +186,10 @@ export default async function Home(props: {
     <div className="min-h-screen bg-[color:var(--bg)] text-[color:var(--ink)]">
       <div className="mx-auto flex min-h-screen max-w-[1720px] flex-col gap-6 px-4 py-4 lg:px-6 xl:px-8 2xl:flex-row 2xl:items-start 2xl:py-6">
         <aside className="w-full rounded-[28px] border border-[color:var(--line)] bg-[color:var(--panel)] p-4 shadow-[0_30px_80px_rgba(13,17,23,0.08)] lg:p-5 2xl:sticky 2xl:top-6 2xl:max-w-[360px] 2xl:self-start">
+          <div className="mb-2 flex items-center justify-end gap-2">
+            <DarkModeToggle />
+          </div>
+          
           <div className="mb-6">
             <p className="text-[11px] font-semibold uppercase tracking-[0.26em] text-[color:var(--accent-ink)]">
               WSPass
@@ -217,6 +222,21 @@ export default async function Home(props: {
                   required
                   className="w-full rounded-[20px] border border-[color:var(--line)] bg-white/70 px-4 py-3 text-sm leading-6 outline-none transition focus:border-[color:var(--accent)] focus:bg-white"
                   placeholder="Paste the plaintext PRD here."
+                />
+              </div>
+              <div>
+                <label
+                  htmlFor="org_constraints_yaml"
+                  className="mb-2 block text-xs font-semibold uppercase tracking-[0.18em] text-[color:var(--muted)]"
+                >
+                  Org Constraints <span className="normal-case font-normal opacity-60">(optional YAML)</span>
+                </label>
+                <textarea
+                  id="org_constraints_yaml"
+                  name="org_constraints_yaml"
+                  rows={3}
+                  className="w-full rounded-[20px] border border-[color:var(--line)] bg-white/70 px-4 py-3 font-mono text-xs leading-6 outline-none transition focus:border-[color:var(--accent)] focus:bg-white dark:bg-black/20"
+                  placeholder={"preferred_cloud: aws\npreferred_iac: terraform..."}
                 />
               </div>
 
