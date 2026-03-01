@@ -109,6 +109,41 @@ function deriveGates(run: RunEnvelope, hasArchitecturePack: boolean, hasDecompos
   };
 }
 
+function PipelineTimeline({ run }: { run: RunEnvelope["run"] }) {
+  const steps = [
+    { key: "created",                label: "Created" },
+    { key: "plan",                    label: "Architecture" },
+    { key: "repo",                    label: "Repo" },
+    { key: "decompose",               label: "Decompose" },
+    { key: "approve",                 label: "Approved" },
+    { key: "export",                  label: "Issues synced" },
+  ] as const;
+
+  return (
+    <div className="flex items-center gap-1 overflow-x-auto">
+      {steps.map((step, i) => {
+        const reached = Boolean(run.step_timestamps?.[step.key]);
+        const isCurrent = run.current_step === step.key;
+        return (
+          <div key={step.key} className="flex items-center gap-1">
+            {i > 0 && <div className={`h-px w-5 ${reached ? "bg-[color:var(--accent)]" : "bg-[color:var(--line)]"}`} />}
+            <div
+              title={run.step_timestamps?.[step.key] ? new Date(run.step_timestamps[step.key]).toLocaleString() : "Not reached"}
+              className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-wide whitespace-nowrap ${
+                isCurrent  ? "bg-[color:var(--accent)] text-white" :
+                reached    ? "bg-[color:var(--panel-strong)] text-[color:var(--ink-strong)]" :
+                             "bg-transparent text-[color:var(--muted)] opacity-50"
+              }`}
+            >
+              {step.label}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default async function Home(props: {
   searchParams?: Promise<{ runId?: string; project?: string }>;
 }) {
@@ -314,6 +349,24 @@ export default async function Home(props: {
               executionStatus={selectedRunResponse.run.execution?.status}
               workflowName={selectedRunResponse.run.execution?.workflow_name}
             >
+              {selectedRunResponse.run.execution?.status === "failed" && (
+                <div className="rounded-[24px] border border-red-300/60 bg-red-50 px-5 py-4 text-sm text-red-800">
+                  <p className="font-semibold">Last workflow failed</p>
+                  <p className="mt-1 font-mono text-xs opacity-80">
+                    {selectedRunResponse.run.execution.workflow_name} · {selectedRunResponse.run.execution.error_message ?? "No error message recorded"}
+                  </p>
+                  {selectedRunResponse.run.execution.github_run_url && (
+                    <a
+                      href={selectedRunResponse.run.execution.github_run_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-2 inline-block text-xs font-semibold underline"
+                    >
+                      View GitHub Actions log →
+                    </a>
+                  )}
+                </div>
+              )}
               <div className="space-y-6">
                 <section className="rounded-[32px] border border-[color:var(--line)] bg-[color:var(--panel)] p-6 shadow-[0_40px_100px_rgba(13,17,23,0.09)]">
                   <div className="flex flex-col gap-6 xl:flex-row xl:items-start xl:justify-between">
@@ -359,6 +412,10 @@ export default async function Home(props: {
                         </p>
                       </div>
                     </div>
+                  </div>
+
+                  <div className="mt-4">
+                    <PipelineTimeline run={selectedRunResponse.run} />
                   </div>
 
                   <div className="mt-6 grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
@@ -533,6 +590,11 @@ export default async function Home(props: {
                       <h3 className="mt-2 text-2xl font-semibold tracking-[-0.04em] text-[color:var(--ink-strong)]">
                         Async work map
                       </h3>
+                      {gates?.decompIsStale && (
+                        <div className="mt-4 rounded-[18px] border border-amber-300/60 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                          ⚠ Architecture was refined — regenerate decomposition to keep it in sync.
+                        </div>
+                      )}
                       {decompositionPlan ? (
                         <>
                           <p className="mt-4 text-sm leading-7 text-[color:var(--muted)]">{decompositionPlan.summary}</p>
