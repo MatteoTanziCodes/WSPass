@@ -17,7 +17,7 @@ The system is designed to answer four questions in order:
 1. What exactly is being built?
 2. What architecture should support it?
 3. How should implementation be broken into concrete work?
-4. How do agents execute that work safely with observability and coordination?
+4. How do agents execute that work safely across new or existing repos with observability and coordination?
 
 ## Product goals
 
@@ -25,6 +25,7 @@ The system is designed to answer four questions in order:
 - Generate one recommended architecture rather than several loosely comparable options.
 - Keep the architecture editable through a wireframe surface and a conversational refinement loop.
 - Break implementation into GitHub issue-sized work units that can be executed by downstream agents.
+- Allow the system to either provision a new downstream repository or attach to an existing repository when scope changes or features are added.
 - Keep implementation synchronized with clarifications, ownership, and observability.
 - Evolve from single-project planning into fleet-wide rollout, patching, and test automation.
 
@@ -93,12 +94,14 @@ The architecture pack contract currently includes:
 
 Phase 2 takes the finalized architecture and implementation rail from Phase 1 and turns them into executable delivery work.
 
-The architecture is translated into infrastructure and repo scaffolding. The code logic is translated into GitHub issue-sized tasks and executed by implementation agents. The repo is intended to become the source of truth for docs, delivery state, and change history.
+The architecture is translated into infrastructure and repo scaffolding. The code logic is translated into GitHub issue-sized tasks and executed by implementation agents. The system is intended to either create a new target repository or attach to an existing one, then use that repo as the source of truth for docs, delivery state, settings, and change history.
 
 ### Phase 2 goals
 
 - Translate architecture into an infrastructure graph and IaC modules.
 - Generate service and repository scaffolding aligned to the architecture.
+- Provision a new target repository when the project does not yet exist.
+- Attach to an existing target repository when the user is extending an existing product or changing scope.
 - Execute logic work through issue-driven implementation agents.
 - Keep issue context synchronized with clarifications and coordination state.
 - Maintain repo-first documentation as code evolves.
@@ -107,10 +110,12 @@ The architecture is translated into infrastructure and repo scaffolding. The cod
 
 - Infrastructure graph for network, compute, data, queues, and secrets
 - IaC modules with explicit TODO boundaries
+- New repo provisioning or existing repo targeting
 - Service scaffolds and local dev setup
 - CI baselines
 - API stubs and config
 - GitHub issue backlog derived from the architecture pack
+- Repo configuration updates such as secrets, variables, workflows, and project metadata where required by the generated solution
 - Repo-first documentation
 - Confluence mirror generated from repository docs
 
@@ -175,6 +180,7 @@ The system is evolving toward a layered agent model.
 ### Implementation and coordination agents
 
 - Implementation Agent: executes GitHub issue-sized logic tasks on top of the finalized architecture
+- Repo Provisioning Agent: creates a new downstream repository or connects the program to an existing repository selected through the UI
 - Coordination Agent: manages clarification queues, updates issue context, and pauses or resumes work
 - Observability Agent: cleans and correlates logs and traces into usable program signals
 
@@ -222,6 +228,7 @@ Its immediate responsibilities are:
 - dispatch workflow-backed agents
 - generate architecture packs
 - create and update implementation issues in a target repo
+- eventually create or attach to downstream target repos based on PRD requirements and user GUI input
 - persist artifacts and run state under `/runs`
 
 This repo is not the final target application repo produced by the system. It is the system that plans and coordinates those downstream repos.
@@ -247,6 +254,7 @@ The current codebase already supports a working vertical slice.
 - full web product experience for wireframe editing and conversational refinement
 - explicit coordination-state API for question queues and pause or resume behavior
 - IaC generation and repo scaffold generation
+- downstream repo creation, existing repo attachment, and repo settings or secrets management
 - Confluence sync
 - fleet catalog and graph execution
 - patch and test automation program rails
