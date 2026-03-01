@@ -1,5 +1,9 @@
+import { config as loadDotenv } from "dotenv";
+import { resolve } from "node:path";
 import Fastify from "fastify";
 import { registerRunsRoutes } from "./modules/runs/runs.routes";
+
+loadDotenv({ path: resolve(__dirname, "../../../.env") });
 
 async function start() {
   const app = Fastify({ logger: true });

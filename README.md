@@ -1,5 +1,392 @@
 # WSPass
 
+WSPass is a multi-agent planning and execution system for turning a product requirements document into a buildable software program.
 
+The intended end state is:
 
-Bootstrap repo for PASS (PRD → architecture → infra graph → IaC → scaffold → repo-first docs).
+`PRD -> structured plan -> single architecture -> wireframe/chat refinement -> IaC handoff + implementation issue rail -> implementation agents -> observable delivery + fleet operations`
+
+For current implementation status, pending work, and `.env` configuration, see [CURRENT_STATUS.md](d:/Programming/Projects/WSPass/CURRENT_STATUS.md).
+
+## Why this exists
+
+Teams routinely lose time between product intent and executable engineering work. Requirements are incomplete, architecture decisions are implicit, implementation work is not cleanly decomposed, and clarifications arrive too late. WSPass is meant to reduce that gap.
+
+The system is designed to answer four questions in order:
+
+1. What exactly is being built?
+2. What architecture should support it?
+3. How should implementation be broken into concrete work?
+4. How do agents execute that work safely with observability and coordination?
+
+## Product goals
+
+- Convert a PRD into a deterministic planning artifact instead of an informal chat transcript.
+- Generate one recommended architecture rather than several loosely comparable options.
+- Keep the architecture editable through a wireframe surface and a conversational refinement loop.
+- Break implementation into GitHub issue-sized work units that can be executed by downstream agents.
+- Keep implementation synchronized with clarifications, ownership, and observability.
+- Evolve from single-project planning into fleet-wide rollout, patching, and test automation.
+
+## Product shape
+
+WSPass is organized into three connected phases.
+
+## Phase 1: PRD to Planning Rail
+
+Phase 1 ingests a PRD and optional organizational constraints, extracts structured planning data, and produces one architecture plus a downstream implementation rail.
+
+This phase is not meant to output abstract brainstorming. It is meant to output a concrete `architecture_pack.json` that can be reviewed, refined, and handed to later execution layers.
+
+### Phase 1 outcomes
+
+- Structured PRD summary
+- Architecture-shaping clarifications
+- Actors and workflows
+- Functional requirements and NFRs
+- Entities and integrations
+- One architecture with rationale and explicit tradeoffs
+- Wireframe refinement metadata
+- Chat refinement prompts and editable topics
+- Implementation summary and IaC handoff
+- Logic requirements
+- GitHub issue plan
+- Coordination and observability requirements
+- Coverage and trace back to requirements
+
+### Phase 1 user flow
+
+1. User submits PRD text and optional org constraints YAML.
+2. System extracts structured requirements, workflows, entities, integrations, and NFRs.
+3. System generates 3 to 5 architecture-shaping clarifications with default assumptions.
+4. System generates one architecture.
+5. System generates refinement guidance for wireframe editing and chat-based questions.
+6. System derives an implementation rail and issue plan from the architecture.
+7. System exports artifacts under `/runs/<runId>/`.
+
+### Phase 1 exported artifacts
+
+- `architecture_pack.json`
+- `architecture_pack_summary.md`
+- `architecture_pack_diagram.txt`
+
+The architecture pack contract currently includes:
+
+- `prd`
+- `org_constraints`
+- `clarifications`
+- `actors`
+- `workflows`
+- `requirements`
+- `entities`
+- `integrations`
+- `nfrs`
+- `architecture`
+- `refinement`
+- `implementation`
+- `assumptions`
+- `open_questions`
+- `coverage`
+- `trace`
+
+## Phase 2: Architecture to Runnable Delivery Rail
+
+Phase 2 takes the finalized architecture and implementation rail from Phase 1 and turns them into executable delivery work.
+
+The architecture is translated into infrastructure and repo scaffolding. The code logic is translated into GitHub issue-sized tasks and executed by implementation agents. The repo is intended to become the source of truth for docs, delivery state, and change history.
+
+### Phase 2 goals
+
+- Translate architecture into an infrastructure graph and IaC modules.
+- Generate service and repository scaffolding aligned to the architecture.
+- Execute logic work through issue-driven implementation agents.
+- Keep issue context synchronized with clarifications and coordination state.
+- Maintain repo-first documentation as code evolves.
+
+### Phase 2 expected outputs
+
+- Infrastructure graph for network, compute, data, queues, and secrets
+- IaC modules with explicit TODO boundaries
+- Service scaffolds and local dev setup
+- CI baselines
+- API stubs and config
+- GitHub issue backlog derived from the architecture pack
+- Repo-first documentation
+- Confluence mirror generated from repository docs
+
+## Phase 3: Fleet Change, Test Automation, and Patch Operations
+
+Phase 3 extends the system from single-project execution into program-level and fleet-level operations.
+
+This phase covers change orchestration across many repositories and services, with explicit ownership, batching, dependency awareness, patch management, test automation, and observability.
+
+### Phase 3 goals
+
+- Discover and catalog a fleet of repositories and services.
+- Model relationships and estimate blast radius conservatively.
+- Route work based on CODEOWNERS and metadata.
+- Run upgrade, patch, and test programs with observable state.
+- Coordinate blocked work and clarifications from a central control surface.
+
+### Phase 3 capabilities
+
+- Fleet catalog of repos, services, owners, runtime, CI pattern, and criticality
+- Dependency graph and blast-radius estimation
+- Program state machine:
+  `Discover -> Plan -> Route -> In Progress -> Blocked -> Done`
+- Ring-based rollout and batching
+- Routing and escalation
+- Command Center UI
+- Test automation with observability
+- Patch management with observability
+- Coordination panel for clarifications, issue updates, and paused agents
+- Program-level status and health views
+
+## Core product principles
+
+### One architecture, not many
+
+The system produces one recommended architecture. Users refine that architecture through the wireframe and chat interface rather than selecting from multiple options.
+
+### Implementation is issue-driven
+
+The system does not stop at architecture. It produces a logic rail and GitHub issue plan so downstream implementation agents can execute focused units of work.
+
+### Clarifications must pause execution
+
+If implementation context is incomplete, implementation agents should pause. Coordination state is part of the product, not an afterthought.
+
+### Observability is first-class
+
+Observability is required in two forms:
+
+- runtime traces, logs, CI, and execution signals
+- coordination visibility, including pending questions, pauses, blockers, and issue updates
+
+## Agent model
+
+The system is evolving toward a layered agent model.
+
+### Planning and design agents
+
+- Planner Agent: turns PRDs into structured planning artifacts and one architecture
+- Documentation Agent: produces high-level feature specs for shipped products
+
+### Implementation and coordination agents
+
+- Implementation Agent: executes GitHub issue-sized logic tasks on top of the finalized architecture
+- Coordination Agent: manages clarification queues, updates issue context, and pauses or resumes work
+- Observability Agent: cleans and correlates logs and traces into usable program signals
+
+### Fleet and rollout agents
+
+- Inventory Agent: discovers repos and services and extracts metadata
+- Graph Agent: builds dependency graphs and blast-radius estimates
+- Routing Agent: assigns work to owners and manages escalation
+- Status Agent: aggregates execution, PR, CI, and ownership signals
+- Upgrade Agent: applies upgrades and patches and opens minimal-diff PRs
+- CI Runner Agent: triggers CI and collects artifacts
+- Fixup Agent: resolves common failures within strict bounds
+- Quality Gate Agent: summarizes lint and static analysis issues
+- PR Explainer Agent: produces change rationale and rollback notes
+
+## Coordination and observability model
+
+The implementation layer is intended to operate with explicit coordination state.
+
+Key expectations:
+
+- implementation agents pause when clarifying questions are pending
+- answers can update issue context in real time
+- issue execution should always reflect the latest approved context
+- command surfaces should show running, paused, blocked, and complete work
+
+The observability model should unify:
+
+- logs
+- traces
+- CI artifacts
+- PR state
+- ownership queue state
+- pending question state
+- issue sync state
+
+## Current repository responsibilities
+
+This repository currently serves as the orchestration and contract repo for the system itself.
+
+Its immediate responsibilities are:
+
+- define shared schemas and execution contracts
+- accept PRD-driven runs
+- dispatch workflow-backed agents
+- generate architecture packs
+- create and update implementation issues in a target repo
+- persist artifacts and run state under `/runs`
+
+This repo is not the final target application repo produced by the system. It is the system that plans and coordinates those downstream repos.
+
+## What is implemented today
+
+The current codebase already supports a working vertical slice.
+
+### Implemented
+
+- Turbo TypeScript monorepo with `apps/api`, `apps/agents`, `apps/web`, and `packages/shared`
+- Shared schema for `architecture_pack.json`
+- Filesystem-backed run store under `/runs`
+- Planner run creation with PRD input persistence
+- Workflow execution contract and execution state persistence
+- Planner agent that calls Anthropic and generates a validated architecture pack
+- Implementation agent that reads the plan and syncs GitHub issues
+- Artifact upload and retrieval through the API
+- Separate configuration for workflow-source repo and issue-target repo
+
+### Not implemented yet
+
+- full web product experience for wireframe editing and conversational refinement
+- explicit coordination-state API for question queues and pause or resume behavior
+- IaC generation and repo scaffold generation
+- Confluence sync
+- fleet catalog and graph execution
+- patch and test automation program rails
+- command center UI
+
+## Execution model
+
+Runs are persisted under `/runs/<runId>/`.
+
+Each run has:
+
+- persisted input
+- run status and current step
+- workflow execution state
+- artifacts
+- optional implementation issue sync state
+
+### Run artifacts
+
+The planner rail writes:
+
+- `architecture_pack`
+- `architecture_pack_summary`
+- `architecture_pack_diagram`
+
+The implementation rail writes:
+
+- `implementation_issue_state`
+- `implementation_issue_state_summary`
+
+## Repository layout
+
+This repository is a Turbo monorepo.
+
+- `apps/api`
+  API for run creation, run state, artifact persistence, workflow dispatch, and agent callbacks
+- `apps/agents`
+  Workflow-executed agents for planning and implementation
+- `apps/web`
+  Frontend workspace
+- `packages/shared`
+  Shared schemas, constants, and contract types
+- `runs`
+  Filesystem-backed run state and generated artifacts
+- `.github/workflows`
+  Planner and implementation workflow entrypoints
+
+## Configuration model
+
+Local configuration lives in `.env`.
+
+### API configuration
+
+- `PASS_API_BASE_URL`
+- `PASS_API_PUBLIC_BASE_URL`
+- `PASS_API_TOKEN`
+
+### Anthropic configuration
+
+- `ANTHROPIC_API_KEY`
+- `ANTHROPIC_MODEL`
+- `ANTHROPIC_BASE_URL`
+- `ANTHROPIC_VERSION`
+- per-section planner token budgets
+
+### GitHub workflow source repo
+
+Use these for the repository that contains the workflow files:
+
+- `GITHUB_WORKFLOW_REPOSITORY`
+- or `GITHUB_WORKFLOW_OWNER` and `GITHUB_WORKFLOW_REPO`
+- optional token override:
+  `PASS_GITHUB_WORKFLOW_TOKEN` or `GITHUB_WORKFLOW_TOKEN`
+
+### GitHub issue target repo
+
+Use these for the repository where the Implementation Agent should create or update issues:
+
+- `GITHUB_ISSUES_REPOSITORY`
+- or `GITHUB_ISSUES_OWNER` and `GITHUB_ISSUES_REPO`
+- optional token override:
+  `PASS_GITHUB_ISSUES_TOKEN` or `GITHUB_ISSUES_TOKEN`
+
+Fallback behavior still exists for backward compatibility:
+
+- `GITHUB_REPOSITORY`
+- `GITHUB_OWNER`
+- `GITHUB_REPO`
+- `PASS_GITHUB_TOKEN`
+- `GITHUB_TOKEN`
+
+## Local development
+
+### Install
+
+```bash
+npm install
+```
+
+### Run the workspace
+
+```bash
+npm run dev
+```
+
+### Common commands
+
+```bash
+npm run build
+npm run typecheck
+npm run lint
+```
+
+### Useful direct commands
+
+For local smoke testing, the direct Node entrypoints are more reliable than `npm run -w ... -- --run-id=...` in PowerShell:
+
+```bash
+node apps/api/dist/server.js
+node apps/agents/dist/cli/planner.js --run-id=<run-id>
+node apps/agents/dist/cli/implementation.js --run-id=<run-id>
+```
+
+## Current tested path
+
+The current validated local path is:
+
+1. Create a run through the API with PRD text.
+2. Queue and dispatch planner execution state.
+3. Run the planner agent.
+4. Persist the architecture pack and companion artifacts.
+5. Queue and dispatch implementation execution state.
+6. Run the implementation agent.
+7. Create or update GitHub issues in the configured target repo.
+8. Persist implementation issue sync state back onto the run.
+
+## Near-term next steps
+
+1. Build the actual wireframe and conversational refinement UI.
+2. Add explicit coordination-state contracts for pending questions, paused agents, and issue updates.
+3. Add IaC generation and repo scaffold generation from the architecture pack.
+4. Add local smoke scripts so planner and implementation rails can be exercised without manual state seeding.
+5. Add the Command Center and fleet-level program rails.

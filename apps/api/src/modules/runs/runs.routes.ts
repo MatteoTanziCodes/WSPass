@@ -1,15 +1,37 @@
 import type { FastifyInstance } from "fastify";
-import { RunStore } from "./runStore";
+import { requireAgentAuth } from "./auth";
 import { createRunsController } from "./runs.controller";
+import { RunStore } from "./runStore";
 
-// Registers the routes for run-related operations (creating a run, listing runs).
 export function registerRunsRoutes(app: FastifyInstance) {
-  
-  const runStore = new RunStore();  // Single store instance per process
+  const runStore = new RunStore();
   const controller = createRunsController({ runStore });
 
-  app.post("/runs", controller.createRun);          // Creates a new run and returns its record.
-  app.get("/runs", controller.listRuns);            // Lists all runs with basic metadata from runs/index.json.
-  app.get("/runs/:runId", controller.getRun);       // Fetches a specific run by ID, returning its details and artifacts metadata.
-  app.patch("/runs/:runId", controller.updateRun);  // Updates a run's status and/or current step, returning the updated run details.
+  app.post("/runs", controller.createRun);
+  app.get("/runs", controller.listRuns);
+  app.get("/runs/:runId", controller.getRun);
+  app.get("/runs/:runId/artifacts/:artifactName", controller.getArtifact);
+  app.patch("/runs/:runId", controller.updateRun);
+
+  app.post("/runs/:runId/dispatch", { preHandler: requireAgentAuth }, controller.dispatchRun);
+  app.post(
+    "/runs/:runId/dispatch/:workflowName",
+    { preHandler: requireAgentAuth },
+    controller.dispatchRun
+  );
+  app.patch(
+    "/runs/:runId/execution",
+    { preHandler: requireAgentAuth },
+    controller.updateExecution
+  );
+  app.post(
+    "/runs/:runId/artifacts",
+    { preHandler: requireAgentAuth },
+    controller.uploadArtifact
+  );
+  app.patch(
+    "/runs/:runId/implementation-state",
+    { preHandler: requireAgentAuth },
+    controller.updateImplementationState
+  );
 }

@@ -3,7 +3,12 @@
 $base = "http://localhost:3001"
 
 # 1) Create a run (captures run_id)
-$created = Invoke-RestMethod -Method Post -Uri "$base/runs" -ContentType "application/json" -Body "{}"
+$createBody = @{
+  prd_text = "Build a PRD-to-architecture planner that generates one architecture, then lets the user refine it in a wireframe and chat interface."
+  requested_by = "local-smoke-test"
+} | ConvertTo-Json
+
+$created = Invoke-RestMethod -Method Post -Uri "$base/runs" -ContentType "application/json" -Body $createBody
 $runId = $created.run.run_id
 "Created run_id: $runId"
 

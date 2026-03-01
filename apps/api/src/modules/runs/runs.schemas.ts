@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { RunStatusSchema, RunStepSchema } from "@pass/shared";
+import {
+  ImplementationIssueStateCollectionSchema,
+  PlannerRunInputSchema,
+  RunExecutionSchema,
+  RunStatusSchema,
+  RunStepSchema,
+} from "@pass/shared";
 
 /**
  * Schemas for run records and runs index file.
@@ -49,6 +55,9 @@ const StepTimestampsSchema = z
 // Full run shape persisted to runs/<runId>/run.json.
 export const RunDetailSchema = RunRecordSchema.extend({
   step_timestamps: StepTimestampsSchema, // Tracks when each step was first reached.
+  input: PlannerRunInputSchema.optional(),
+  execution: RunExecutionSchema.optional(),
+  implementation_state: ImplementationIssueStateCollectionSchema.optional(),
 }).strict();
 
 export type RunDetail = z.infer<typeof RunDetailSchema>;

@@ -3,9 +3,6 @@
 /** PASS Architecture Pack contract version. */
 export const PACK_VERSION = "0.1" as const;
 
-/** Architecture options are always A/B/C for deterministic comparisons. */
-export const OPTION_IDS = ["A", "B", "C"] as const;
-
 /** Normalized component kinds so 2B can map them to infra deterministically. */
 export const COMPONENT_TYPES = [
   "web",
@@ -24,11 +21,25 @@ export const RUN_STATUSES = [
   "created",
   "parsed",
   "clarified",
-  "options_generated",
-  "selected",
+  "plan_generated",
   "exported",
   "failed",
 ] as const;
 
 /** Step names. */
-export const RUN_STEPS = ["created", "parse", "clarify", "options", "select", "export"] as const;
+export const RUN_STEPS = ["created", "parse", "clarify", "plan", "export"] as const;
+
+/** Supported execution backends for workflow-driven agents. */
+export const RUN_EXECUTION_BACKENDS = ["github_actions"] as const;
+
+/** Execution lifecycle for workflow-backed runs. */
+export const RUN_EXECUTION_STATUSES = [
+  "queued",
+  "dispatched",
+  "running",
+  "succeeded",
+  "failed",
+] as const;
+
+/** Initial workflow names supported by the execution contract. */
+export const WORKFLOW_NAMES = ["phase1-planner", "phase2-implementation"] as const;

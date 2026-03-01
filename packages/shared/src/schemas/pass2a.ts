@@ -1,11 +1,7 @@
-// packages/shared/src/schemas/pass2a.ts
 import { z } from "zod";
-import { COMPONENT_TYPES, OPTION_IDS, PACK_VERSION, RUN_STATUSES, RUN_STEPS } from "../constants";
+import { COMPONENT_TYPES, PACK_VERSION, RUN_STATUSES, RUN_STEPS } from "../constants";
 
 /* ----------------------------- Shared enums ------------------------------ */
-
-export const OptionIdSchema = z.enum(OPTION_IDS);
-export type OptionId = z.infer<typeof OptionIdSchema>;
 
 export const ComponentTypeSchema = z.enum(COMPONENT_TYPES);
 export type ComponentType = z.infer<typeof ComponentTypeSchema>;
@@ -68,10 +64,9 @@ export type OrgConstraints = z.infer<typeof OrgConstraintsSchema>;
 
 /* ---------------------------- Architecture Pack --------------------------- */
 
-// ClarificationSchema: minimal Q&A that resolves architecture-shaping ambiguities
 export const ClarificationSchema = z
   .object({
-    id: z.string().min(1), // CLAR-001
+    id: z.string().min(1),
     question: z.string().min(1),
     answer: z.string().min(1),
     default_used: z.boolean().default(false),
@@ -79,26 +74,23 @@ export const ClarificationSchema = z
   })
   .strict();
 
-// Workflows extracted from PRD (keeps architecture grounded in real flows).
 export const WorkflowSchema = z
   .object({
-    id: z.string().min(1), // WF-001
+    id: z.string().min(1),
     name: z.string().min(1),
     steps: z.array(z.string().min(1)).min(1),
   })
   .strict();
 
-// Functional requirements (must/should/could) + lightweight acceptance checks.
 export const RequirementSchema = z
   .object({
-    id: z.string().min(1), // REQ-001
+    id: z.string().min(1),
     text: z.string().min(1),
     priority: z.enum(["must", "should", "could"]).default("must"),
     acceptance_criteria: z.array(z.string().min(1)).default([]),
   })
   .strict();
 
-// High-level domain entities (conceptual model, not a DB schema).
 export const EntitySchema = z
   .object({
     name: z.string().min(1),
@@ -107,7 +99,6 @@ export const EntitySchema = z
   })
   .strict();
 
-// Integrations + their purpose and importance (direction + criticality helps drive retries/queues tradeoffs).
 export const IntegrationSchema = z
   .object({
     name: z.string().min(1),
@@ -118,7 +109,6 @@ export const IntegrationSchema = z
   })
   .strict();
 
-// Non-functional requirements that drive architecture choices
 export const NfrsSchema = z
   .object({
     scale: z.enum(["small", "medium", "large"]).default("small"),
@@ -129,7 +119,6 @@ export const NfrsSchema = z
   })
   .strict();
 
-// A normalized component in an option: a named component + its normalized type (so 2B can map to infra ~ ).
 export const ArchitectureComponentSchema = z
   .object({
     name: z.string().min(1),
@@ -137,41 +126,112 @@ export const ArchitectureComponentSchema = z
   })
   .strict();
 
-// An architecture option (A/B/C) with its components, tradeoffs, and rationale.
-export const ArchitectureOptionSchema = z
+export const ArchitectureTradeoffsSchema = z
   .object({
-    option_id: OptionIdSchema,
-    name: z.string().min(1),
-    components: z.array(ArchitectureComponentSchema).min(1),
+    pros: z.array(z.string().min(1)).default([]),
+    cons: z.array(z.string().min(1)).default([]),
+    risks: z.array(z.string().min(1)).default([]),
+  })
+  .strict();
 
+export const ArchitectureSchema = z
+  .object({
+    name: z.string().min(1),
+    description: z.string().min(1),
+    components: z.array(ArchitectureComponentSchema).min(1),
+    data_flows: z.array(z.string().min(1)).default([]),
     data_stores: z.array(z.string().min(1)).default([]),
     async_patterns: z.array(z.string().min(1)).default([]),
-
     api_surface: z.array(z.string().min(1)).default([]),
-
-    tradeoffs: z
-      .object({
-        pros: z.array(z.string().min(1)).default([]),
-        cons: z.array(z.string().min(1)).default([]),
-        risks: z.array(z.string().min(1)).default([]),
-      })
-      .strict(),
-
-    when_to_choose: z.string().min(1),
+    tradeoffs: ArchitectureTradeoffsSchema,
+    rationale: z.string().min(1),
   })
   .strict();
 
-// Required human selection gate for choosing the final option
-export const SelectionSchema = z
+export const LogicRequirementSchema = z
   .object({
-    selected_option_id: OptionIdSchema,
-    selected_by: z.literal("human").default("human"),
-    reason: z.string().optional(),
-    timestamp: z.string().datetime(),
+    id: z.string().min(1),
+    title: z.string().min(1),
+    summary: z.string().min(1),
+    priority: z.enum(["must", "should", "could"]).default("must"),
+    acceptance_criteria: z.array(z.string().min(1)).default([]),
+    affected_components: z.array(z.string().min(1)).default([]),
+    dependencies: z.array(z.string().min(1)).default([]),
   })
   .strict();
 
-// Mapping the coverage status of each requirement (prove key needs weren't ignored)
+export const GitHubIssuePlanItemSchema = z
+  .object({
+    id: z.string().min(1),
+    title: z.string().min(1),
+    summary: z.string().min(1),
+    body: z.string().min(1),
+    labels: z.array(z.string().min(1)).default([]),
+    depends_on: z.array(z.string().min(1)).default([]),
+    acceptance_criteria: z.array(z.string().min(1)).default([]),
+  })
+  .strict();
+
+export const IaCHandoffSchema = z
+  .object({
+    summary: z.string().min(1),
+    modules: z.array(z.string().min(1)).default([]),
+  })
+  .strict();
+
+export const ImplementationCoordinationSchema = z
+  .object({
+    pause_on_pending_questions: z.boolean().default(true),
+    live_issue_updates: z.boolean().default(true),
+    coordination_views: z.array(z.string().min(1)).default([]),
+    question_sources: z.array(z.string().min(1)).default([]),
+  })
+  .strict();
+
+export const ImplementationObservabilitySchema = z
+  .object({
+    log_traces_enabled: z.boolean().default(true),
+    coordination_panel_enabled: z.boolean().default(true),
+    required_signals: z.array(z.string().min(1)).default([]),
+    dashboard_panels: z.array(z.string().min(1)).default([]),
+  })
+  .strict();
+
+export const ImplementationRailSchema = z
+  .object({
+    summary: z.string().min(1),
+    iac_handoff: IaCHandoffSchema,
+    logic_requirements: z.array(LogicRequirementSchema).default([]),
+    github_issue_plan: z.array(GitHubIssuePlanItemSchema).default([]),
+    coordination: ImplementationCoordinationSchema,
+    observability: ImplementationObservabilitySchema,
+  })
+  .strict();
+
+export const RefinementSchema = z
+  .object({
+    wireframe: z
+      .object({
+        enabled: z.boolean().default(true),
+        editable_components: z.array(z.string().min(1)).default([]),
+      })
+      .strict()
+      .default({ enabled: true, editable_components: [] }),
+    chat: z
+      .object({
+        enabled: z.boolean().default(true),
+        suggested_questions: z.array(z.string().min(1)).default([]),
+        editable_topics: z.array(z.string().min(1)).default([]),
+      })
+      .strict()
+      .default({ enabled: true, suggested_questions: [], editable_topics: [] }),
+  })
+  .strict()
+  .default({
+    wireframe: { enabled: true, editable_components: [] },
+    chat: { enabled: true, suggested_questions: [], editable_topics: [] },
+  });
+
 export const CoverageItemSchema = z
   .object({
     requirement_id: z.string().min(1),
@@ -180,7 +240,6 @@ export const CoverageItemSchema = z
   })
   .strict();
 
-// Light trace linking requirements back to PRD hints
 export const TraceItemSchema = z
   .object({
     requirement_id: z.string().min(1),
@@ -188,36 +247,6 @@ export const TraceItemSchema = z
   })
   .strict();
 
-// 2–3 options only; unique option_ids; stable A->B->C order
-const ArchitectureOptionsSchema = z
-  .array(ArchitectureOptionSchema)
-  .min(2)
-  .max(3)
-  .superRefine((opts, ctx) => {
-    const ids = opts.map((o) => o.option_id);
-    const unique = new Set(ids);
-    if (unique.size !== ids.length) {
-      ctx.addIssue({
-        code: "custom",
-        message: "architecture_options must not contain duplicate option_id values",
-      });
-    }
-
-    const expectedOrder = OPTION_IDS.filter((id) => unique.has(id));
-    const sameOrder =
-      ids.length === expectedOrder.length && ids.every((id, i) => id === expectedOrder[i]);
-
-    if (!sameOrder) {
-      ctx.addIssue({
-        code: "custom",
-        message: `architecture_options must be ordered deterministically as ${expectedOrder.join(
-          ", "
-        )}`,
-      });
-    }
-  });
-
-// The exported 2A→2B contract: deterministic, schema-validated Architecture Pack.
 export const ArchitecturePackSchema = z
   .object({
     pack_version: z.literal(PACK_VERSION),
@@ -249,24 +278,15 @@ export const ArchitecturePackSchema = z
     integrations: z.array(IntegrationSchema).default([]),
     nfrs: NfrsSchema,
 
-    architecture_options: ArchitectureOptionsSchema,
-    selection: SelectionSchema,
+    architecture: ArchitectureSchema,
+    refinement: RefinementSchema,
+    implementation: ImplementationRailSchema,
 
     assumptions: z.array(z.string().min(1)).default([]),
     open_questions: z.array(z.string().min(1)).default([]),
     coverage: z.array(CoverageItemSchema).default([]),
     trace: z.array(TraceItemSchema).default([]),
   })
-  .strict()
-  .superRefine((pack, ctx) => {
-    const optionIds = new Set(pack.architecture_options.map((o) => o.option_id));
-    if (!optionIds.has(pack.selection.selected_option_id)) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["selection", "selected_option_id"],
-        message: "selection.selected_option_id must match an option in architecture_options",
-      });
-    }
-  });
+  .strict();
 
 export type ArchitecturePack = z.infer<typeof ArchitecturePackSchema>;
