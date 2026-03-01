@@ -19,6 +19,7 @@ function buildProjectRedirect(runId: string, projectKey?: string) {
   return `/?${search.toString()}`;
 }
 
+// Create a run
 export async function createRunAction(formData: FormData) {
   const prdText = String(formData.get("prd_text") ?? "").trim();
   const repoMode = String(formData.get("repo_mode") ?? "existing").trim();
@@ -64,6 +65,7 @@ export async function createRunAction(formData: FormData) {
   redirect(buildProjectRedirect(run.run_id, projectKey));
 }
 
+// Dispatch workflows
 export async function dispatchWorkflowAction(formData: FormData) {
   const runId = String(formData.get("run_id") ?? "").trim();
   const projectKey = String(formData.get("project_key") ?? "").trim() || undefined;
@@ -83,6 +85,7 @@ export async function dispatchWorkflowAction(formData: FormData) {
   redirect(buildProjectRedirect(runId, projectKey));
 }
 
+// Send refinement feedback
 export async function sendArchitectureFeedbackAction(formData: FormData) {
   const runId = String(formData.get("run_id") ?? "").trim();
   const projectKey = String(formData.get("project_key") ?? "").trim() || undefined;
@@ -123,6 +126,7 @@ export async function sendArchitectureFeedbackAction(formData: FormData) {
   redirect(buildProjectRedirect(runId, projectKey));
 }
 
+// Approve decomposition
 export async function approveDecompositionAction(formData: FormData) {
   const runId = String(formData.get("run_id") ?? "").trim();
   const projectKey = String(formData.get("project_key") ?? "").trim() || undefined;

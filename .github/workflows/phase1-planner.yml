@@ -36,7 +36,7 @@ jobs:
 
       - name: Run planner agent
         env:
-          PASS_API_BASE_URL: ${{ inputs.api_base_url }}
+          PASS_API_BASE_URL: ${{ inputs.api_base_url || vars.PASS_API_BASE_URL }}
           PASS_API_TOKEN: ${{ secrets.PASS_API_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}
