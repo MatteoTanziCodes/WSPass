@@ -1,8 +1,10 @@
 import { z } from "zod";
 import {
-  ArchitecturePackSchema,
+  DecompositionPlanSchema,
+  DecompositionStateSchema,
   ImplementationIssueStateCollectionSchema,
   PlannerRunInputSchema,
+  RepoStateSchema,
   RunExecutionSchema,
   RunStatusSchema,
   RunStepSchema,
@@ -19,6 +21,8 @@ const RunDetailSchema = z
     step_timestamps: z.record(z.string(), z.string().datetime()),
     input: PlannerRunInputSchema.optional(),
     execution: RunExecutionSchema.optional(),
+    repo_state: RepoStateSchema.optional(),
+    decomposition_state: DecompositionStateSchema.optional(),
     implementation_state: ImplementationIssueStateCollectionSchema.optional(),
   })
   .strict();
@@ -81,6 +85,10 @@ class PassApiClient {
 
   async updateImplementationState(runId: string, payload: z.infer<typeof ImplementationIssueStateCollectionSchema>) {
     await this.request("PATCH", `/runs/${runId}/implementation-state`, payload, true);
+  }
+
+  async updateDecompositionState(runId: string, payload: z.infer<typeof DecompositionStateSchema>) {
+    await this.request("PATCH", `/runs/${runId}/decomposition-state`, payload, true);
   }
 
   async uploadArtifact(
@@ -167,23 +175,47 @@ export async function runImplementationAgent(runId: string): Promise<void> {
   const githubRunUrl = process.env.GITHUB_RUN_URL;
 
   try {
-    await api.getRun(runId);
+    const run = await api.getRun(runId);
+    if (!run.repo_state) {
+      throw new Error("Target repository has not been resolved for this run.");
+    }
+
     await api.updateExecution(runId, {
       status: "running",
       github_run_id: Number.isFinite(githubRunId) ? githubRunId : undefined,
       github_run_url: githubRunUrl,
     });
 
-    const artifactResponse = await api.getArtifact(runId, "architecture_pack");
-    const pack = ArchitecturePackSchema.parse(artifactResponse.payload);
-    const issuesClient = new GitHubIssuesClient();
+    if (!run.decomposition_state || !["approved", "synced"].includes(run.decomposition_state.status)) {
+      throw new Error("Decomposition must be approved before implementation issue sync can run.");
+    }
+
+    const artifactName = run.decomposition_state.artifact_name || "decomposition_plan";
+    const artifactResponse = await api.getArtifact(runId, artifactName);
+    const plan = DecompositionPlanSchema.parse(artifactResponse.payload);
+    const issuesClient = new GitHubIssuesClient({
+      owner: run.repo_state.owner,
+      repo: run.repo_state.name,
+    });
     const synced = await issuesClient.syncIssues({
       runId,
-      items: pack.implementation.github_issue_plan.map((item) => ({
+      items: plan.work_items.map((item) => ({
         id: item.id,
         title: item.title,
         summary: item.summary,
-        body: item.body,
+        body: [
+          "Summary:",
+          item.summary,
+          "",
+          `Component: ${item.component}`,
+          `Category: ${item.category}`,
+          `Size: ${item.size}`,
+          "",
+          "Acceptance Criteria:",
+          ...(item.acceptance_criteria.length > 0
+            ? item.acceptance_criteria.map((value) => `- ${value}`)
+            : ["- Validate against the approved decomposition work item."]),
+        ].join("\n"),
         labels: item.labels,
         acceptance_criteria: item.acceptance_criteria,
       })),
@@ -191,7 +223,7 @@ export async function runImplementationAgent(runId: string): Promise<void> {
 
     const normalizedState = ImplementationIssueStateCollectionSchema.parse({
       synced_at: new Date().toISOString(),
-      issues: pack.implementation.github_issue_plan.map((item) => {
+      issues: plan.work_items.map((item) => {
         const selected = synced.find((issue) => issue.planItemId === item.id);
         return {
           plan_item_id: item.id,
@@ -216,6 +248,12 @@ export async function runImplementationAgent(runId: string): Promise<void> {
       name: "implementation_issue_state_summary",
       content_type: "text/markdown",
       payload: renderIssueSummary(normalizedState),
+    });
+    await api.updateDecompositionState(runId, {
+      ...run.decomposition_state,
+      status: "synced",
+      artifact_name: artifactName,
+      work_item_count: plan.work_items.length,
     });
 
     await api.updateExecution(runId, {

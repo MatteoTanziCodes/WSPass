@@ -1,8 +1,11 @@
 import { z } from "zod";
 import { ArtifactMetadataSchema, RunDetailSchema, RunRecordSchema } from "./runs.schemas";
 import {
+  ArchitectureChatStateSchema,
+  DecompositionStateSchema,
   ImplementationIssueStateCollectionSchema,
   PlannerRunInputSchema,
+  RepoStateSchema,
   RunExecutionSchema,
   RunStatusSchema,
   RunStepSchema,
@@ -114,6 +117,30 @@ export const GetArtifactResponseSchema = z
 export const UpdateImplementationStateRequestSchema = ImplementationIssueStateCollectionSchema;
 
 export const UpdateImplementationStateResponseSchema = z
+  .object({
+    run: RunDetailSchema,
+  })
+  .strict();
+
+export const UpdateRepoStateRequestSchema = RepoStateSchema;
+
+export const UpdateRepoStateResponseSchema = z
+  .object({
+    run: RunDetailSchema,
+  })
+  .strict();
+
+export const UpdateArchitectureChatRequestSchema = ArchitectureChatStateSchema;
+
+export const UpdateArchitectureChatResponseSchema = z
+  .object({
+    run: RunDetailSchema,
+  })
+  .strict();
+
+export const UpdateDecompositionStateRequestSchema = DecompositionStateSchema;
+
+export const UpdateDecompositionStateResponseSchema = z
   .object({
     run: RunDetailSchema,
   })

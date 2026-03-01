@@ -1,9 +1,12 @@
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import {
+  ArchitectureChatStateSchema,
   ArchitecturePackSchema,
+  DecompositionStateSchema,
   OrgConstraintsSchema,
   PlannerRunInputSchema,
+  RepoStateSchema,
   RunExecutionSchema,
   RunStatusSchema,
   RunStepSchema,
@@ -22,6 +25,7 @@ const RunDetailSchema = z
     step_timestamps: z.record(z.string(), z.string().datetime()),
     input: PlannerRunInputSchema.optional(),
     execution: RunExecutionSchema.optional(),
+    repo_state: RepoStateSchema.optional(),
   })
   .strict();
 
@@ -83,6 +87,14 @@ class PassApiClient {
     await this.request("POST", `/runs/${runId}/artifacts`, artifact, true);
   }
 
+  async updateArchitectureChat(runId: string, payload: z.infer<typeof ArchitectureChatStateSchema>): Promise<void> {
+    await this.request("PATCH", `/runs/${runId}/architecture-chat`, payload, true);
+  }
+
+  async updateDecompositionState(runId: string, payload: z.infer<typeof DecompositionStateSchema>): Promise<void> {
+    await this.request("PATCH", `/runs/${runId}/decomposition-state`, payload, true);
+  }
+
   private async request(method: string, path: string, body?: unknown, authenticated = false) {
     const headers: Record<string, string> = {
       Accept: "application/json",
@@ -127,7 +139,7 @@ function toNodeId(name: string) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "node";
 }
 
-function renderSummary(pack: ArchitecturePack) {
+export function renderSummary(pack: ArchitecturePack) {
   const architecture = pack.architecture;
   const implementation = pack.implementation;
   const suggestedQuestions =
@@ -194,7 +206,9 @@ function renderSummary(pack: ArchitecturePack) {
         ])
       : ["- None"]),
     "",
-    "## GitHub Issue Plan",
+    "## Decomposition Draft",
+    "This is a draft backlog derived from the current architecture. It should be refined and approved before creating GitHub issues or starting implementation agents.",
+    "",
     ...(issuePlan.length > 0
       ? issuePlan.flatMap((item) => [
           `- ${item.id}: ${item.title}`,
@@ -225,7 +239,7 @@ function renderSummary(pack: ArchitecturePack) {
   ].join("\n");
 }
 
-function renderMermaid(pack: ArchitecturePack) {
+export function renderMermaid(pack: ArchitecturePack) {
   const architecture = pack.architecture;
   const lines = ["flowchart LR"];
 
@@ -303,6 +317,29 @@ export async function runPlannerAgent(runId: string): Promise<void> {
       name: "architecture_pack_diagram",
       content_type: "text/plain",
       payload: renderMermaid(pack),
+    });
+    const initialChat = ArchitectureChatStateSchema.parse({
+      updated_at: new Date().toISOString(),
+      messages: [
+        {
+          id: "assistant_initial_plan",
+          role: "assistant",
+          content:
+            "Initial architecture generated. Review the structure, ask for changes, and refine the plan before decomposition or implementation.",
+          created_at: new Date().toISOString(),
+        },
+      ],
+    });
+    await api.uploadArtifact(runId, {
+      name: "architecture_chat",
+      content_type: "application/json",
+      payload: initialChat,
+    });
+    await api.updateArchitectureChat(runId, initialChat);
+    await api.updateDecompositionState(runId, {
+      status: "not_started",
+      artifact_name: "decomposition_plan",
+      work_item_count: 0,
     });
 
     await api.updateRun(runId, { status: "exported", current_step: "export" });

@@ -3,8 +3,11 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 
 import type {
+  ArchitectureChatState,
+  DecompositionState,
   ImplementationIssueStateCollection,
   PlannerRunInput,
+  RepoState,
   RunExecution,
   RunExecutionStatus,
   WorkflowName,
@@ -303,6 +306,30 @@ export class RunStore {
     return this.persistRun({
       ...existing,
       implementation_state: implementationState,
+    });
+  }
+
+  async updateRepoState(runId: string, repoState: RepoState): Promise<RunDetail> {
+    const existing = await this.getRun(runId);
+    return this.persistRun({
+      ...existing,
+      repo_state: repoState,
+    });
+  }
+
+  async updateArchitectureChat(runId: string, architectureChat: ArchitectureChatState): Promise<RunDetail> {
+    const existing = await this.getRun(runId);
+    return this.persistRun({
+      ...existing,
+      architecture_chat: architectureChat,
+    });
+  }
+
+  async updateDecompositionState(runId: string, decompositionState: DecompositionState): Promise<RunDetail> {
+    const existing = await this.getRun(runId);
+    return this.persistRun({
+      ...existing,
+      decomposition_state: decompositionState,
     });
   }
 

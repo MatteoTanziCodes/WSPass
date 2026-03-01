@@ -9,13 +9,24 @@ Use this document for:
 - current delivery status
 - local setup and testing
 - understanding what is real versus planned
-- configuring workflow and issue targets safely
+- configuring workflow and downstream target-repo settings safely
 
 Use [README.md](d:/Programming/Projects/WSPass/README.md) for the broader product vision and roadmap.
 
 ## What is implemented
 
 The repository currently supports a working planning rail and a working implementation issue-sync rail.
+It now also supports a working repo-resolution rail for attaching to an existing downstream repo or creating a new one.
+It also includes a first-stage dashboard and a dedicated decomposition rail between architecture and issue sync.
+
+The intended user input surface is intentionally small:
+
+- PRD text
+- whether the target repo exists already
+- new repo name if the repo does not exist
+- new repo visibility if the repo does not exist
+
+Descriptions, repo bootstrap docs, issue plans, and other delivery artifacts are expected to be agent-generated from that input.
 
 ### Shared contracts
 
@@ -47,6 +58,7 @@ Main API entrypoints live under:
 - Planner agent generates one architecture pack
 - Planner output is validated against the shared schema
 - Planner artifacts are uploaded back to the API
+- Planner initializes architecture chat state for refinement
 
 Planner implementation lives under:
 
@@ -54,12 +66,38 @@ Planner implementation lives under:
 - [runPlannerAgent.ts](d:/Programming/Projects/WSPass/apps/agents/src/planner/runPlannerAgent.ts)
 - [llmClient.ts](d:/Programming/Projects/WSPass/apps/agents/src/providers/llmClient.ts)
 
+### Architecture refinement rail
+
+- Architecture refinement agent reads the current architecture pack and architecture chat state
+- Refinement requests are submitted from the dashboard chat
+- The refinement agent updates `architecture_pack`, summary, diagram, and chat history
+- Decomposition state is reset when architecture changes
+
+Architecture refinement lives under:
+
+- [architectureRefinement.ts](d:/Programming/Projects/WSPass/apps/agents/src/cli/architectureRefinement.ts)
+- [runArchitectureRefinementAgent.ts](d:/Programming/Projects/WSPass/apps/agents/src/architecture/runArchitectureRefinementAgent.ts)
+
+### Decomposition rail
+
+- Decomposition agent reads the finalized architecture pack
+- Decomposition agent generates a granular backlog artifact of very small work items
+- Decomposition state is persisted onto the run as `draft`, then later `approved`, then `synced`
+- Implementation issue sync is gated on decomposition approval
+
+Decomposition rail lives under:
+
+- [decomposition.ts](d:/Programming/Projects/WSPass/apps/agents/src/cli/decomposition.ts)
+- [runDecompositionAgent.ts](d:/Programming/Projects/WSPass/apps/agents/src/decomposition/runDecompositionAgent.ts)
+
 ### Implementation rail
 
 - Implementation agent reads `architecture_pack`
 - Implementation agent syncs GitHub issues from `implementation.github_issue_plan`
 - Issue sync state is persisted back onto the run
 - Summary artifacts are written for issue sync visibility
+
+At the moment, issue sync exists as a runtime capability, but the intended product flow is to use it only after the architecture and decomposition have been reviewed and approved.
 
 Implementation rail lives under:
 
@@ -70,8 +108,17 @@ Implementation rail lives under:
 ### Workflow layer
 
 - Planner workflow exists in [.github/workflows/phase1-planner.yml](d:/Programming/Projects/WSPass/.github/workflows/phase1-planner.yml)
+- Architecture refinement workflow exists in [.github/workflows/phase1-architecture-refinement.yml](d:/Programming/Projects/WSPass/.github/workflows/phase1-architecture-refinement.yml)
+- Repo provisioning workflow exists in [.github/workflows/phase2-repo-provision.yml](d:/Programming/Projects/WSPass/.github/workflows/phase2-repo-provision.yml)
+- Decomposition workflow exists in [.github/workflows/phase2-decomposition.yml](d:/Programming/Projects/WSPass/.github/workflows/phase2-decomposition.yml)
 - Implementation workflow exists in [.github/workflows/phase2-implementation.yml](d:/Programming/Projects/WSPass/.github/workflows/phase2-implementation.yml)
-- Workflow dispatch repo and issue target repo are now separately configurable
+- Workflow dispatch repo and downstream target repo are now separately configurable
+
+### Dashboard
+
+- The placeholder web app has been replaced with a first-stage dashboard
+- The dashboard can create runs, list repos the GitHub token can access, dispatch workflows, show the current architecture, accept chat refinement input, and display decomposition output
+- The dashboard is server-driven and currently refresh-based, not real-time
 
 ## What has been tested
 
@@ -82,7 +129,11 @@ The following paths have been validated locally:
 - `npm run -w @pass/shared validate:samples`
 - direct planner generation against Anthropic
 - API-backed planner execution from run creation through exported artifacts
+- API-backed repo resolution onto a run with persisted `repo_state`
 - implementation-agent issue sync into GitHub with persisted run state
+- repo-wide typecheck and build after adding the dashboard, architecture refinement rail, and decomposition rail
+
+The new refinement, decomposition, and dashboard paths have been validated through typecheck and build, but they have not yet been smoke-tested end to end against live GitHub Actions in this repo.
 
 ### Known working outputs
 
@@ -91,6 +142,17 @@ Planner rail:
 - `architecture_pack`
 - `architecture_pack_summary`
 - `architecture_pack_diagram`
+- `architecture_chat`
+
+Repo resolution rail:
+
+- `repo_state`
+- `repo_state_summary`
+
+Decomposition rail:
+
+- `decomposition_plan`
+- `decomposition_plan_summary`
 
 Implementation rail:
 
@@ -141,6 +203,9 @@ The following work is still planned or partially defined but not implemented end
 - The web app is not yet the full product experience described in the roadmap.
 - Local smoke testing still requires seeding execution state when GitHub workflow dispatch is bypassed.
 - The implementation rail currently syncs GitHub issues but does not yet execute code changes in downstream repos.
+- The new dashboard currently renders architecture cards and refinement chat, but it does not yet provide a true drag-and-edit wireframe composer.
+- Repo resolution currently supports attaching to an existing repo and personal-account repo creation logic, but it does not yet configure secrets, variables, workflows, or repo contents.
+- New repo descriptions are now derived automatically from the PRD when the user does not supply additional metadata.
 - Coordination state is described in the contract directionally, but not yet implemented as a first-class runtime rail.
 - Anthropic generation is working, but the planner client is intentionally split into multiple smaller generation steps for reliability.
 
@@ -161,15 +226,12 @@ For current usage, configure exactly:
 - one local PASS API base URL
 - one Anthropic API key and model
 - one workflow source repo
-- one issue target repo
-- one GitHub PAT with the union of permissions needed for both workflow dispatch and target-repo operations
+- one optional fallback issue target repo
+- one GitHub PAT used for every GitHub operation
+- optional repo-provision workflow file override if you do not want to use the default workflow filename
+- optional refinement and decomposition workflow file overrides
 
 You do not need to set legacy fallback variables for normal local usage.
-
-The simplest current setup is to reuse the same PAT in both:
-
-- `PASS_GITHUB_WORKFLOW_TOKEN`
-- `PASS_GITHUB_ISSUES_TOKEN`
 
 That PAT should have access to:
 
@@ -234,7 +296,9 @@ These values control the section-by-section Anthropic generation budgets:
 - `ANTHROPIC_DOMAIN_MAX_TOKENS`
 - `ANTHROPIC_ARCHITECTURE_MAX_TOKENS`
 - `ANTHROPIC_REFINEMENT_MAX_TOKENS`
+- `ANTHROPIC_ARCHITECTURE_REFINEMENT_MAX_TOKENS`
 - `ANTHROPIC_IMPLEMENTATION_OVERVIEW_MAX_TOKENS`
+- `ANTHROPIC_DECOMPOSITION_MAX_TOKENS`
 - `ANTHROPIC_COVERAGE_MAX_TOKENS`
 
 Recommended starting values:
@@ -247,7 +311,9 @@ ANTHROPIC_REQUIREMENTS_MAX_TOKENS=700
 ANTHROPIC_DOMAIN_MAX_TOKENS=650
 ANTHROPIC_ARCHITECTURE_MAX_TOKENS=800
 ANTHROPIC_REFINEMENT_MAX_TOKENS=500
+ANTHROPIC_ARCHITECTURE_REFINEMENT_MAX_TOKENS=2600
 ANTHROPIC_IMPLEMENTATION_OVERVIEW_MAX_TOKENS=550
+ANTHROPIC_DECOMPOSITION_MAX_TOKENS=3200
 ANTHROPIC_COVERAGE_MAX_TOKENS=500
 ```
 
@@ -256,6 +322,8 @@ ANTHROPIC_COVERAGE_MAX_TOKENS=500
 This is the repository that contains:
 
 - `.github/workflows/phase1-planner.yml`
+- `.github/workflows/phase1-architecture-refinement.yml`
+- `.github/workflows/phase2-decomposition.yml`
 - `.github/workflows/phase2-implementation.yml`
 
 For this repo, that is normally `WSPass`.
@@ -265,9 +333,12 @@ Set:
 - `GITHUB_WORKFLOW_REPOSITORY`
   in `owner/repo` format
 - `PASS_GITHUB_WORKFLOW_TOKEN`
-  token with workflow or actions dispatch access to that repo
+  token used for workflow dispatch, repo provisioning, and issue sync
 - `GITHUB_WORKFLOW_REF`
   branch or ref to dispatch against
+- `GITHUB_ARCHITECTURE_REFINEMENT_WORKFLOW_FILE`
+- `GITHUB_DECOMPOSITION_WORKFLOW_FILE`
+- `GITHUB_REPO_PROVISION_WORKFLOW_FILE`
 - `GITHUB_PLANNER_WORKFLOW_FILE`
 - `GITHUB_IMPLEMENTATION_WORKFLOW_FILE`
 
@@ -277,6 +348,9 @@ Example:
 GITHUB_WORKFLOW_REPOSITORY=owner/WSPass
 PASS_GITHUB_WORKFLOW_TOKEN=github-token-with-required-access
 GITHUB_WORKFLOW_REF=main
+GITHUB_ARCHITECTURE_REFINEMENT_WORKFLOW_FILE=phase1-architecture-refinement.yml
+GITHUB_DECOMPOSITION_WORKFLOW_FILE=phase2-decomposition.yml
+GITHUB_REPO_PROVISION_WORKFLOW_FILE=phase2-repo-provision.yml
 GITHUB_PLANNER_WORKFLOW_FILE=phase1-planner.yml
 GITHUB_IMPLEMENTATION_WORKFLOW_FILE=phase2-implementation.yml
 ```
@@ -287,18 +361,17 @@ This is the repository where the Implementation Agent should create or update is
 
 For safe testing, this should usually be a disposable test repo, not `WSPass`.
 
+If the run input includes `repo_target`, that modular input takes precedence and `GITHUB_ISSUES_REPOSITORY` is not required as a fallback for that run.
+
 Set:
 
 - `GITHUB_ISSUES_REPOSITORY`
   in `owner/repo` format
-- `PASS_GITHUB_ISSUES_TOKEN`
-  usually the same PAT as `PASS_GITHUB_WORKFLOW_TOKEN`
 
 Example:
 
 ```env
 GITHUB_ISSUES_REPOSITORY=owner/test-target-repo
-PASS_GITHUB_ISSUES_TOKEN=github-token-with-required-access
 ```
 
 ### Step 6: GitHub PAT permissions
@@ -363,12 +436,14 @@ ANTHROPIC_COVERAGE_MAX_TOKENS=500
 GITHUB_WORKFLOW_REPOSITORY=owner/WSPass
 PASS_GITHUB_WORKFLOW_TOKEN=github-token-with-required-access
 GITHUB_WORKFLOW_REF=main
+GITHUB_ARCHITECTURE_REFINEMENT_WORKFLOW_FILE=phase1-architecture-refinement.yml
+GITHUB_DECOMPOSITION_WORKFLOW_FILE=phase2-decomposition.yml
+GITHUB_REPO_PROVISION_WORKFLOW_FILE=phase2-repo-provision.yml
 GITHUB_PLANNER_WORKFLOW_FILE=phase1-planner.yml
 GITHUB_IMPLEMENTATION_WORKFLOW_FILE=phase2-implementation.yml
 
-# Issue target repo
+# Optional issue target fallback
 GITHUB_ISSUES_REPOSITORY=owner/test-target-repo
-PASS_GITHUB_ISSUES_TOKEN=github-token-with-required-access
 
 # Optional
 RUNS_DIR=
@@ -382,10 +457,7 @@ For most setups, only these fields need to be replaced with real values:
 - `ANTHROPIC_API_KEY`
 - `GITHUB_WORKFLOW_REPOSITORY`
 - `PASS_GITHUB_WORKFLOW_TOKEN`
-- `GITHUB_ISSUES_REPOSITORY`
-- `PASS_GITHUB_ISSUES_TOKEN`
-
-In the simplest setup, `PASS_GITHUB_WORKFLOW_TOKEN` and `PASS_GITHUB_ISSUES_TOKEN` can be the same value.
+- `GITHUB_ISSUES_REPOSITORY` only if you want a default fallback repo when `repo_target` is not provided
 
 ## GitHub configuration rules
 
@@ -403,10 +475,13 @@ Configure it with:
 - `GITHUB_WORKFLOW_REPOSITORY`
 - or `GITHUB_WORKFLOW_OWNER` plus `GITHUB_WORKFLOW_REPO`
 
-Optional token override:
+Primary token:
 
 - `PASS_GITHUB_WORKFLOW_TOKEN`
-- or `GITHUB_WORKFLOW_TOKEN`
+
+Legacy fallback:
+
+- `GITHUB_WORKFLOW_TOKEN`
 
 ### Issue target repository
 
@@ -417,10 +492,7 @@ Configure it with:
 - `GITHUB_ISSUES_REPOSITORY`
 - or `GITHUB_ISSUES_OWNER` plus `GITHUB_ISSUES_REPO`
 
-Optional token override:
-
-- `PASS_GITHUB_ISSUES_TOKEN`
-- or `GITHUB_ISSUES_TOKEN`
+No separate issue token is needed. Implementation issue sync uses the same workflow PAT.
 
 ### Backward compatibility
 
@@ -440,7 +512,7 @@ If you are testing the system safely, use:
 
 - workflow source repo = `WSPass`
 - issue target repo = a separate disposable test repo
-- same PAT copied into both GitHub token fields unless you deliberately want permission isolation
+- one PAT in `PASS_GITHUB_WORKFLOW_TOKEN`
 
 That lets the system orchestrate from this repo while writing implementation issues somewhere else.
 
@@ -484,9 +556,29 @@ node apps/agents/dist/cli/planner.js --run-id=<run-id>
 node apps/agents/dist/cli/implementation.js --run-id=<run-id>
 ```
 
+Only do this after the architecture has been reviewed and you are ready to synchronize the approved backlog into GitHub issues.
+
+### Run the architecture refinement agent locally
+
+```bash
+node apps/agents/dist/cli/architectureRefinement.js --run-id=<run-id>
+```
+
+### Run the decomposition agent locally
+
+```bash
+node apps/agents/dist/cli/decomposition.js --run-id=<run-id>
+```
+
+### Run the repo-provisioning agent locally
+
+```bash
+node apps/agents/dist/cli/repoProvision.js --run-id=<run-id>
+```
+
 ## Suggested next work
 
-1. Add a dedicated local smoke script so run creation, execution seeding, planner execution, and implementation execution can be tested without manual steps.
+1. Smoke-test the refinement workflow, decomposition workflow, and dashboard against live GitHub Actions.
 2. Add coordination-state persistence and pause or resume behavior.
-3. Add a browser UI for architecture refinement and coordination visibility.
+3. Upgrade the dashboard into a true editable wireframe surface.
 4. Add downstream repo generation and IaC scaffolding.

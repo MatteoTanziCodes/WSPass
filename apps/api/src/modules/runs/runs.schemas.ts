@@ -1,7 +1,10 @@
 import { z } from "zod";
 import {
+  ArchitectureChatStateSchema,
+  DecompositionStateSchema,
   ImplementationIssueStateCollectionSchema,
   PlannerRunInputSchema,
+  RepoStateSchema,
   RunExecutionSchema,
   RunStatusSchema,
   RunStepSchema,
@@ -57,6 +60,9 @@ export const RunDetailSchema = RunRecordSchema.extend({
   step_timestamps: StepTimestampsSchema, // Tracks when each step was first reached.
   input: PlannerRunInputSchema.optional(),
   execution: RunExecutionSchema.optional(),
+  repo_state: RepoStateSchema.optional(),
+  architecture_chat: ArchitectureChatStateSchema.optional(),
+  decomposition_state: DecompositionStateSchema.optional(),
   implementation_state: ImplementationIssueStateCollectionSchema.optional(),
 }).strict();
 

@@ -4,6 +4,9 @@
   "private": true,
   "scripts": {
     "planner": "tsx src/cli/planner.ts",
+    "architecture-refinement": "tsx src/cli/architectureRefinement.ts",
+    "repo-provision": "tsx src/cli/repoProvision.ts",
+    "decomposition": "tsx src/cli/decomposition.ts",
     "implementation": "tsx src/cli/implementation.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",

@@ -22,12 +22,22 @@ export const RUN_STATUSES = [
   "parsed",
   "clarified",
   "plan_generated",
+  "decomposition_generated",
+  "approved",
   "exported",
   "failed",
 ] as const;
 
 /** Step names. */
-export const RUN_STEPS = ["created", "parse", "clarify", "plan", "export"] as const;
+export const RUN_STEPS = [
+  "created",
+  "parse",
+  "clarify",
+  "plan",
+  "decompose",
+  "approve",
+  "export",
+] as const;
 
 /** Supported execution backends for workflow-driven agents. */
 export const RUN_EXECUTION_BACKENDS = ["github_actions"] as const;
@@ -42,4 +52,10 @@ export const RUN_EXECUTION_STATUSES = [
 ] as const;
 
 /** Initial workflow names supported by the execution contract. */
-export const WORKFLOW_NAMES = ["phase1-planner", "phase2-implementation"] as const;
+export const WORKFLOW_NAMES = [
+  "phase1-planner",
+  "phase1-architecture-refinement",
+  "phase2-repo-provision",
+  "phase2-decomposition",
+  "phase2-implementation",
+] as const;

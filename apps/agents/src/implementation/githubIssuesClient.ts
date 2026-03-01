@@ -31,9 +31,15 @@ type GitHubIssue = {
   pull_request?: unknown;
 };
 
-function resolveRepository() {
-  const explicitOwner = process.env.GITHUB_ISSUES_OWNER ?? process.env.GITHUB_OWNER;
-  const explicitRepo = process.env.GITHUB_ISSUES_REPO ?? process.env.GITHUB_REPO;
+type GitHubIssuesClientOptions = {
+  owner?: string;
+  repo?: string;
+  token?: string;
+};
+
+function resolveRepository(explicit?: { owner?: string; repo?: string }) {
+  const explicitOwner = explicit?.owner ?? process.env.GITHUB_ISSUES_OWNER ?? process.env.GITHUB_OWNER;
+  const explicitRepo = explicit?.repo ?? process.env.GITHUB_ISSUES_REPO ?? process.env.GITHUB_REPO;
 
   if (explicitOwner && explicitRepo) {
     return { owner: explicitOwner, repo: explicitRepo };
@@ -54,15 +60,16 @@ function resolveRepository() {
   return { owner, repo };
 }
 
-function readGitHubToken() {
+function readGitHubToken(explicit?: string) {
   const token =
-    process.env.PASS_GITHUB_ISSUES_TOKEN ??
-    process.env.GITHUB_ISSUES_TOKEN ??
+    explicit ??
+    process.env.PASS_GITHUB_WORKFLOW_TOKEN ??
+    process.env.GITHUB_WORKFLOW_TOKEN ??
     process.env.PASS_GITHUB_TOKEN ??
     process.env.GITHUB_TOKEN;
   if (!token) {
     throw new Error(
-      "GitHub issue sync requires PASS_GITHUB_ISSUES_TOKEN, GITHUB_ISSUES_TOKEN, PASS_GITHUB_TOKEN, or GITHUB_TOKEN."
+      "GitHub issue sync requires PASS_GITHUB_WORKFLOW_TOKEN, GITHUB_WORKFLOW_TOKEN, PASS_GITHUB_TOKEN, or GITHUB_TOKEN."
     );
   }
   return token;
@@ -111,9 +118,9 @@ export class GitHubIssuesClient {
   private readonly owner: string;
   private readonly repo: string;
 
-  constructor() {
-    this.token = readGitHubToken();
-    const repository = resolveRepository();
+  constructor(opts?: GitHubIssuesClientOptions) {
+    this.token = readGitHubToken(opts?.token);
+    const repository = resolveRepository({ owner: opts?.owner, repo: opts?.repo });
     this.owner = repository.owner;
     this.repo = repository.repo;
   }

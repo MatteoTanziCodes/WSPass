@@ -13,8 +13,14 @@ import {
   RunIdParamsSchema,
   UpdateExecutionRequestSchema,
   UpdateExecutionResponseSchema,
+  UpdateArchitectureChatRequestSchema,
+  UpdateArchitectureChatResponseSchema,
+  UpdateDecompositionStateRequestSchema,
+  UpdateDecompositionStateResponseSchema,
   UpdateImplementationStateRequestSchema,
   UpdateImplementationStateResponseSchema,
+  UpdateRepoStateRequestSchema,
+  UpdateRepoStateResponseSchema,
   UpdateRunRequestSchema,
   UpdateRunResponseSchema,
   UploadArtifactRequestSchema,
@@ -97,7 +103,13 @@ export function createRunsController(deps: {
     async dispatchRun(request: FastifyRequest, reply: FastifyReply) {
       let runId = "";
       let queued = false;
-      let workflowName: "phase1-planner" | "phase2-implementation" = "phase1-planner";
+      let workflowName:
+        | "phase1-planner"
+        | "phase1-architecture-refinement"
+        | "phase2-repo-provision"
+        | "phase2-decomposition"
+        | "phase2-implementation" =
+        "phase1-planner";
 
       try {
         if ((request.params as Record<string, unknown>)?.workflowName) {
@@ -109,6 +121,17 @@ export function createRunsController(deps: {
         }
 
         if (workflowName === "phase2-implementation") {
+          await runStore.readArtifact(runId, "architecture_pack");
+          const run = await runStore.getRun(runId);
+          if (!run.repo_state) {
+            throw new RunConflictError("Cannot dispatch implementation before target repo is resolved.");
+          }
+          if (!run.decomposition_state || run.decomposition_state.status !== "approved") {
+            throw new RunConflictError("Cannot dispatch implementation before decomposition is approved.");
+          }
+        }
+
+        if (workflowName === "phase2-decomposition" || workflowName === "phase1-architecture-refinement") {
           await runStore.readArtifact(runId, "architecture_pack");
         }
 
@@ -225,6 +248,57 @@ export function createRunsController(deps: {
         const body = UpdateImplementationStateRequestSchema.parse((request as { body?: unknown }).body);
         const run = await runStore.updateImplementationState(runId, body);
         return reply.send(UpdateImplementationStateResponseSchema.parse({ run }));
+      } catch (err: any) {
+        if (err instanceof RunNotFoundError) {
+          return reply.code(404).send({ error: "run_not_found", message: err.message });
+        }
+        if (err instanceof z.ZodError) {
+          return reply.code(400).send({ error: "bad_request", issues: err.issues });
+        }
+        throw err;
+      }
+    },
+
+    async updateRepoState(request: FastifyRequest, reply: FastifyReply) {
+      try {
+        const { runId } = RunIdParamsSchema.parse(request.params);
+        const body = UpdateRepoStateRequestSchema.parse((request as { body?: unknown }).body);
+        const run = await runStore.updateRepoState(runId, body);
+        return reply.send(UpdateRepoStateResponseSchema.parse({ run }));
+      } catch (err: any) {
+        if (err instanceof RunNotFoundError) {
+          return reply.code(404).send({ error: "run_not_found", message: err.message });
+        }
+        if (err instanceof z.ZodError) {
+          return reply.code(400).send({ error: "bad_request", issues: err.issues });
+        }
+        throw err;
+      }
+    },
+
+    async updateArchitectureChat(request: FastifyRequest, reply: FastifyReply) {
+      try {
+        const { runId } = RunIdParamsSchema.parse(request.params);
+        const body = UpdateArchitectureChatRequestSchema.parse((request as { body?: unknown }).body);
+        const run = await runStore.updateArchitectureChat(runId, body);
+        return reply.send(UpdateArchitectureChatResponseSchema.parse({ run }));
+      } catch (err: any) {
+        if (err instanceof RunNotFoundError) {
+          return reply.code(404).send({ error: "run_not_found", message: err.message });
+        }
+        if (err instanceof z.ZodError) {
+          return reply.code(400).send({ error: "bad_request", issues: err.issues });
+        }
+        throw err;
+      }
+    },
+
+    async updateDecompositionState(request: FastifyRequest, reply: FastifyReply) {
+      try {
+        const { runId } = RunIdParamsSchema.parse(request.params);
+        const body = UpdateDecompositionStateRequestSchema.parse((request as { body?: unknown }).body);
+        const run = await runStore.updateDecompositionState(runId, body);
+        return reply.send(UpdateDecompositionStateResponseSchema.parse({ run }));
       } catch (err: any) {
         if (err instanceof RunNotFoundError) {
           return reply.code(404).send({ error: "run_not_found", message: err.message });

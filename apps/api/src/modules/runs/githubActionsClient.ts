@@ -1,5 +1,10 @@
 type DispatchWorkflowInput = {
-  workflowName: "phase1-planner" | "phase2-implementation";
+  workflowName:
+    | "phase1-planner"
+    | "phase1-architecture-refinement"
+    | "phase2-repo-provision"
+    | "phase2-decomposition"
+    | "phase2-implementation";
   runId: string;
   apiBaseUrl: string;
 };
@@ -70,7 +75,13 @@ export class GitHubActionsClient {
 
   async dispatchWorkflow(input: DispatchWorkflowInput): Promise<void> {
     const workflowFile =
-      input.workflowName === "phase2-implementation"
+      input.workflowName === "phase1-architecture-refinement"
+        ? process.env.GITHUB_ARCHITECTURE_REFINEMENT_WORKFLOW_FILE ?? "phase1-architecture-refinement.yml"
+        : input.workflowName === "phase2-repo-provision"
+        ? process.env.GITHUB_REPO_PROVISION_WORKFLOW_FILE ?? "phase2-repo-provision.yml"
+        : input.workflowName === "phase2-decomposition"
+        ? process.env.GITHUB_DECOMPOSITION_WORKFLOW_FILE ?? "phase2-decomposition.yml"
+        : input.workflowName === "phase2-implementation"
         ? process.env.GITHUB_IMPLEMENTATION_WORKFLOW_FILE ?? "phase2-implementation.yml"
         : process.env.GITHUB_PLANNER_WORKFLOW_FILE ?? "phase1-planner.yml";
     const url = `https://api.github.com/repos/${this.owner}/${this.repo}/actions/workflows/${workflowFile}/dispatches`;

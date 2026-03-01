@@ -1,9 +1,11 @@
 import { z } from "zod";
 import {
   ArchitecturePackSchema,
+  DecompositionPlanSchema,
   OrgConstraintsSchema,
   PACK_VERSION,
   type ArchitecturePack,
+  type DecompositionPlan,
   type OrgConstraints,
 } from "@pass/shared";
 
@@ -161,6 +163,15 @@ type GenerateArchitecturePackInput = {
   runId: string;
   prdText: string;
   orgConstraints: OrgConstraints;
+};
+
+type RefineArchitecturePackInput = {
+  currentPack: ArchitecturePack;
+  messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
+};
+
+type GenerateDecompositionPlanInput = {
+  pack: ArchitecturePack;
 };
 
 type AnthropicCompletion = {
@@ -342,6 +353,36 @@ function buildCoverageTracePrompt(
       logic_requirements: logicRequirements,
       github_issue_plan: issuePlan,
     }),
+  ].join("\n");
+}
+
+function buildArchitectureRefinementPrompt(input: RefineArchitecturePackInput) {
+  return [
+    `Return JSON with the exact full ArchitecturePack shape used by PASS-2A.`,
+    "Preserve stable IDs where possible.",
+    "Update the architecture, requirements, refinement guidance, implementation summary, assumptions, open questions, coverage, and trace when the feedback requires it.",
+    "Keep the pack coherent as one source of truth.",
+    "Do not add markdown.",
+    "Current architecture pack JSON:",
+    compactJson(input.currentPack),
+    "Conversation messages JSON:",
+    compactJson(input.messages),
+  ].join("\n");
+}
+
+function buildDecompositionPrompt(input: GenerateDecompositionPlanInput) {
+  const targetCount = Number(process.env.PASS_DECOMPOSITION_TARGET_COUNT ?? "36");
+  return [
+    'Return JSON with this exact shape: {"generated_at":"2026-01-01T00:00:00.000Z","summary":"...","approval_notes":"optional","work_items":[{"id":"work_1","title":"...","summary":"...","category":"backend","size":"tiny","component":"API","acceptance_criteria":["..."],"depends_on":["work_0"],"labels":["implementation","category:backend"]}]}',
+    `Generate approximately ${targetCount} work items unless the project is too small to justify that many.`,
+    "Work items must be very small and async-friendly.",
+    "Prefer tiny tasks over broad tasks.",
+    "Each work item should focus on one component or one thin slice.",
+    "Use category only from frontend, backend, infra, data, qa, docs, ops.",
+    "Use size only from tiny or small.",
+    "Keep acceptance criteria short.",
+    "Architecture pack JSON:",
+    compactJson(input.pack),
   ].join("\n");
 }
 
@@ -902,4 +943,50 @@ export async function generateArchitecturePack(
     input,
     createdAt
   );
+}
+
+export async function refineArchitecturePack(
+  input: RefineArchitecturePackInput
+): Promise<ArchitecturePack> {
+  const refined = await generateSection(
+    ArchitecturePackSchema,
+    "Architecture refinement",
+    buildSectionSystemPrompt("architecture refinement", [
+      "Return the full architecture pack JSON only.",
+      "Preserve existing context unless feedback explicitly changes it.",
+    ]),
+    buildArchitectureRefinementPrompt(input),
+    Number(process.env.ANTHROPIC_ARCHITECTURE_REFINEMENT_MAX_TOKENS ?? "2600")
+  );
+
+  return ArchitecturePackSchema.parse({
+    ...refined,
+    run_id: input.currentPack.run_id,
+    pack_version: PACK_VERSION,
+    created_at: new Date().toISOString(),
+    tool: {
+      name: "PASS-2A",
+      version: TOOL_VERSION,
+    },
+  });
+}
+
+export async function generateDecompositionPlan(
+  input: GenerateDecompositionPlanInput
+): Promise<DecompositionPlan> {
+  const draft = await generateSection(
+    DecompositionPlanSchema,
+    "Decomposition plan",
+    buildSectionSystemPrompt("decomposition plan", [
+      "Return only the decomposition plan JSON.",
+      "Generate many very small work items.",
+    ]),
+    buildDecompositionPrompt(input),
+    Number(process.env.ANTHROPIC_DECOMPOSITION_MAX_TOKENS ?? "3200")
+  );
+
+  return DecompositionPlanSchema.parse({
+    ...draft,
+    generated_at: new Date().toISOString(),
+  });
 }

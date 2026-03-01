@@ -30,6 +30,21 @@ export function registerRunsRoutes(app: FastifyInstance) {
     controller.uploadArtifact
   );
   app.patch(
+    "/runs/:runId/repo-state",
+    { preHandler: requireAgentAuth },
+    controller.updateRepoState
+  );
+  app.patch(
+    "/runs/:runId/architecture-chat",
+    { preHandler: requireAgentAuth },
+    controller.updateArchitectureChat
+  );
+  app.patch(
+    "/runs/:runId/decomposition-state",
+    { preHandler: requireAgentAuth },
+    controller.updateDecompositionState
+  );
+  app.patch(
     "/runs/:runId/implementation-state",
     { preHandler: requireAgentAuth },
     controller.updateImplementationState
