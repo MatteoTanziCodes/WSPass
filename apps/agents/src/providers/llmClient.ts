@@ -398,13 +398,11 @@ function buildRepairPrompt(candidate: string, issues: string[]) {
   ].join("\n");
 }
 
-function buildTruncationPrompt(initialPrompt: string) {
-  return [
-    initialPrompt,
-    "The previous response was cut off.",
-    "Return a shorter JSON object.",
-    "Use fewer items and shorter strings.",
-  ].join("\n");
+function buildTruncationPrompt(initialPrompt: string, attempt: number) {
+  const note = attempt === 1
+    ? "The previous response was cut off. Return a much shorter JSON object with fewer items and shorter strings."
+    : "The response is still too long. Return the absolute minimum valid JSON — 2 items max per array, 1 sentence per string.";
+  return [note, initialPrompt].join("\n");
 }
 
 function extractText(response: any) {
@@ -551,7 +549,7 @@ async function generateSection<T extends z.ZodTypeAny>(
       } catch (error) {
         if (completion.stopReason === "max_tokens") {
           lastError = "Model output was truncated by max_tokens.";
-          currentPrompt = buildTruncationPrompt(initialPrompt);
+          currentPrompt = buildTruncationPrompt(initialPrompt, attempt+1);
           continue;
         }
         throw error;
@@ -578,7 +576,7 @@ async function generateSection<T extends z.ZodTypeAny>(
       }
 
       if (message.includes("No JSON value found")) {
-        currentPrompt = buildTruncationPrompt(initialPrompt);
+        currentPrompt = buildTruncationPrompt(initialPrompt, attempt+1);
         continue;
       }
 
