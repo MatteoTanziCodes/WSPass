@@ -8,6 +8,7 @@ import type {
   ImplementationIssueStateCollection,
   PlannerRunInput,
   RepoState,
+  RunExecutionBackend,
   RunExecution,
   RunExecutionStatus,
   WorkflowName,
@@ -129,6 +130,40 @@ export class RunStore {
     return sortRunsNewestFirst(index.runs);
   }
 
+  async listRunSummaries(): Promise<
+    Array<
+      RunRecord & {
+        input?: RunDetail["input"];
+        execution?: RunDetail["execution"];
+        repo_state?: RunDetail["repo_state"];
+        decomposition_state?: RunDetail["decomposition_state"];
+      }
+    >
+  > {
+    const index = await this.readOrInitIndex();
+    const summaries = await Promise.all(
+      index.runs.map(async (record) => {
+        const run = await this.getRun(record.run_id);
+        return {
+          run_id: run.run_id,
+          created_at: run.created_at,
+          status: run.status,
+          current_step: run.current_step,
+          last_updated_at: run.last_updated_at,
+          input: run.input,
+          execution: run.execution,
+          repo_state: run.repo_state,
+          decomposition_state: run.decomposition_state,
+        };
+      })
+    );
+
+    return summaries.sort(
+      (left, right) =>
+        new Date(right.last_updated_at).getTime() - new Date(left.last_updated_at).getTime()
+    );
+  }
+
   async getRun(runId: string): Promise<RunDetail> {
     try {
       return await readJson(this.getRunPath(runId), RunDetailSchema);
@@ -146,7 +181,11 @@ export class RunStore {
     });
   }
 
-  async queueExecution(runId: string, workflowName: WorkflowName): Promise<RunDetail> {
+  async queueExecution(
+    runId: string,
+    workflowName: WorkflowName,
+    backend: RunExecutionBackend = "github_actions"
+  ): Promise<RunDetail> {
     const existing = await this.getRun(runId);
 
     if (!existing.input) {
@@ -162,7 +201,7 @@ export class RunStore {
     return this.persistRun({
       ...existing,
       execution: {
-        backend: "github_actions",
+        backend,
         workflow_name: workflowName,
         status: "queued",
         requested_at: now,

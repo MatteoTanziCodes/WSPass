@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { ArchitectureChatStateSchema } from "@pass/shared";
 import {
+  ApiRequestError,
   approveDecomposition,
   createRun,
   dispatchWorkflow,
@@ -17,6 +18,14 @@ function buildProjectRedirect(runId: string, projectKey?: string) {
     search.set("project", projectKey);
   }
   return `/?${search.toString()}`;
+}
+
+function isActiveExecutionConflict(error: unknown) {
+  return (
+    error instanceof ApiRequestError &&
+    error.status === 409 &&
+    error.body.includes("Run execution is already active")
+  );
 }
 
 export async function createRunAction(formData: FormData) {
@@ -78,7 +87,13 @@ export async function dispatchWorkflowAction(formData: FormData) {
     throw new Error("run_id and workflow_name are required.");
   }
 
-  await dispatchWorkflow(runId, workflowName);
+  try {
+    await dispatchWorkflow(runId, workflowName);
+  } catch (error) {
+    if (!isActiveExecutionConflict(error)) {
+      throw error;
+    }
+  }
   revalidatePath("/");
   redirect(buildProjectRedirect(runId, projectKey));
 }
@@ -118,7 +133,13 @@ export async function sendArchitectureFeedbackAction(formData: FormData) {
   });
 
   await updateArchitectureChat(runId, nextState);
-  await dispatchWorkflow(runId, "phase1-architecture-refinement");
+  try {
+    await dispatchWorkflow(runId, "phase1-architecture-refinement");
+  } catch (error) {
+    if (!isActiveExecutionConflict(error)) {
+      throw error;
+    }
+  }
   revalidatePath("/");
   redirect(buildProjectRedirect(runId, projectKey));
 }

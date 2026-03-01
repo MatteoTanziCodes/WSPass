@@ -40,7 +40,7 @@ export const RUN_STEPS = [
 ] as const;
 
 /** Supported execution backends for workflow-driven agents. */
-export const RUN_EXECUTION_BACKENDS = ["github_actions"] as const;
+export const RUN_EXECUTION_BACKENDS = ["github_actions", "local_process"] as const;
 
 /** Execution lifecycle for workflow-backed runs. */
 export const RUN_EXECUTION_STATUSES = [

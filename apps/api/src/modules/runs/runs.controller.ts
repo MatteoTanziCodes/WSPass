@@ -31,6 +31,11 @@ import {
   GitHubActionsDispatchError,
   GitHubActionsClient,
 } from "./githubActionsClient";
+import {
+  LocalWorkflowRunner,
+  LocalWorkflowRunnerError,
+  shouldUseLocalWorkflowExecution,
+} from "./localWorkflowRunner";
 import type { RunStore } from "./runStore";
 import {
   InvalidExecutionTransitionError,
@@ -62,7 +67,7 @@ export function createRunsController(deps: {
     },
 
     async listRuns(_request: FastifyRequest, reply: FastifyReply) {
-      const runs = await runStore.listRuns();
+      const runs = await runStore.listRunSummaries();
       return reply.send(ListRunsResponseSchema.parse({ total: runs.length, runs }));
     },
 
@@ -135,15 +140,28 @@ export function createRunsController(deps: {
           await runStore.readArtifact(runId, "architecture_pack");
         }
 
-        await runStore.queueExecution(runId, workflowName);
+        const useLocalExecution = shouldUseLocalWorkflowExecution();
+        await runStore.queueExecution(
+          runId,
+          workflowName,
+          useLocalExecution ? "local_process" : "github_actions"
+        );
         queued = true;
 
-        const githubActionsClient = new GitHubActionsClient();
-        await githubActionsClient.dispatchWorkflow({
-          workflowName,
-          runId,
-          apiBaseUrl: resolveApiBaseUrl(request),
-        });
+        if (useLocalExecution) {
+          const localWorkflowRunner = new LocalWorkflowRunner();
+          await localWorkflowRunner.dispatchWorkflow({
+            workflowName,
+            runId,
+          });
+        } else {
+          const githubActionsClient = new GitHubActionsClient();
+          await githubActionsClient.dispatchWorkflow({
+            workflowName,
+            runId,
+            apiBaseUrl: resolveApiBaseUrl(request),
+          });
+        }
 
         const dispatchedRun = await runStore.markExecutionDispatched(runId);
         return reply.send(
@@ -170,6 +188,12 @@ export function createRunsController(deps: {
             await runStore.failExecution(runId, err.message);
           }
           return reply.code(500).send({ error: "server_misconfigured", message: err.message });
+        }
+        if (err instanceof LocalWorkflowRunnerError) {
+          if (queued) {
+            await runStore.failExecution(runId, err.message);
+          }
+          return reply.code(500).send({ error: "local_dispatch_failed", message: err.message });
         }
         if (err instanceof z.ZodError) {
           return reply.code(400).send({ error: "bad_request", issues: err.issues });

@@ -24,30 +24,31 @@ function StatusBadge({ label }: { label: string }) {
   );
 }
 
+type RunListItem = Awaited<ReturnType<typeof listRuns>>[number];
 type RunEnvelope = NonNullable<Awaited<ReturnType<typeof getRun>>>;
 
-function deriveProjectKey(run: RunEnvelope) {
+function deriveProjectKey(run: RunListItem) {
   return (
-    run.run.repo_state?.repository ??
-    run.run.input?.repo_target?.repository ??
-    run.run.input?.repo_target?.name ??
-    run.run.run_id
+    run.repo_state?.repository ??
+    run.input?.repo_target?.repository ??
+    run.input?.repo_target?.name ??
+    run.run_id
   );
 }
 
-function deriveProjectLabel(run: RunEnvelope) {
-  return run.run.repo_state?.repository ?? run.run.input?.repo_target?.repository ?? run.run.input?.repo_target?.name ?? "Untitled project";
+function deriveProjectLabel(run: RunListItem) {
+  return run.repo_state?.repository ?? run.input?.repo_target?.repository ?? run.input?.repo_target?.name ?? "Untitled project";
 }
 
-function buildProjectGroups(runs: RunEnvelope[]) {
+function buildProjectGroups(runs: RunListItem[]) {
   const grouped = new Map<
     string,
     {
       key: string;
       label: string;
       repoUrl?: string;
-      latest: RunEnvelope;
-      runs: RunEnvelope[];
+      latest: RunListItem;
+      runs: RunListItem[];
     }
   >();
 
@@ -58,7 +59,7 @@ function buildProjectGroups(runs: RunEnvelope[]) {
       grouped.set(key, {
         key,
         label: deriveProjectLabel(run),
-        repoUrl: run.run.repo_state?.html_url,
+        repoUrl: run.repo_state?.html_url,
         latest: run,
         runs: [run],
       });
@@ -66,10 +67,10 @@ function buildProjectGroups(runs: RunEnvelope[]) {
     }
 
     existing.runs.push(run);
-    if (new Date(run.run.last_updated_at).getTime() > new Date(existing.latest.run.last_updated_at).getTime()) {
+    if (new Date(run.last_updated_at).getTime() > new Date(existing.latest.last_updated_at).getTime()) {
       existing.latest = run;
       existing.label = deriveProjectLabel(run);
-      existing.repoUrl = run.run.repo_state?.html_url ?? existing.repoUrl;
+      existing.repoUrl = run.repo_state?.html_url ?? existing.repoUrl;
     }
   }
 
@@ -78,13 +79,13 @@ function buildProjectGroups(runs: RunEnvelope[]) {
       ...project,
       runs: project.runs.sort(
         (left, right) =>
-          new Date(right.run.last_updated_at).getTime() - new Date(left.run.last_updated_at).getTime()
+          new Date(right.last_updated_at).getTime() - new Date(left.last_updated_at).getTime()
       ),
     }))
     .sort(
       (left, right) =>
-        new Date(right.latest.run.last_updated_at).getTime() -
-        new Date(left.latest.run.last_updated_at).getTime()
+        new Date(right.latest.last_updated_at).getTime() -
+        new Date(left.latest.last_updated_at).getTime()
     );
 }
 
@@ -93,30 +94,31 @@ export default async function Home(props: {
 }) {
   const searchParams = (await props.searchParams) ?? {};
   const runs = await listRuns();
-  const detailedRuns = (await Promise.all(runs.map((run) => getRun(run.run_id)))).filter(
-    (run): run is RunEnvelope => Boolean(run)
-  );
-  const projects = buildProjectGroups(detailedRuns);
+  const projects = buildProjectGroups(runs);
   const repositories = await listAccessibleRepositories();
 
   const selectedRunFromQuery = searchParams.runId
-    ? detailedRuns.find((run) => run.run.run_id === searchParams.runId)
+    ? runs.find((run) => run.run_id === searchParams.runId)
     : undefined;
   const selectedProject =
-    (selectedRunFromQuery && projects.find((project) => project.runs.some((run) => run.run.run_id === selectedRunFromQuery.run.run_id))) ??
+    (selectedRunFromQuery && projects.find((project) => project.runs.some((run) => run.run_id === selectedRunFromQuery.run_id))) ??
     (searchParams.project ? projects.find((project) => project.key === searchParams.project) : undefined) ??
     projects[0];
-  const selectedRunResponse =
+  const selectedRunSummary =
     (searchParams.runId
-      ? selectedProject?.runs.find((run) => run.run.run_id === searchParams.runId)
+      ? selectedProject?.runs.find((run) => run.run_id === searchParams.runId)
       : undefined) ??
     selectedProject?.latest ??
     null;
 
-  const selectedRunId = selectedRunResponse?.run.run_id;
+  const selectedRunId = selectedRunSummary?.run_id;
+  const selectedRunResponse = selectedRunId ? await getRun(selectedRunId) : null;
   const selectedProjectKey = selectedProject?.key;
   const architecturePack = selectedRunId ? await getArchitecturePack(selectedRunId) : null;
   const decompositionPlan = selectedRunId ? await getDecompositionPlan(selectedRunId) : null;
+  const hasActiveExecution = selectedRunResponse
+    ? ["queued", "dispatched", "running"].includes(selectedRunResponse.run.execution?.status ?? "")
+    : false;
 
   return (
     <div className="min-h-screen bg-[color:var(--bg)] text-[color:var(--ink)]">
@@ -256,7 +258,7 @@ export default async function Home(props: {
                   return (
                     <a
                       key={project.key}
-                      href={`/?project=${encodeURIComponent(project.key)}&runId=${project.latest.run.run_id}`}
+                      href={`/?project=${encodeURIComponent(project.key)}&runId=${project.latest.run_id}`}
                       className={`block rounded-[24px] border px-4 py-4 transition ${
                         active
                           ? "border-[color:var(--accent)] bg-[color:var(--panel-strong)]"
@@ -267,10 +269,10 @@ export default async function Home(props: {
                         <div className="min-w-0">
                           <p className="truncate text-sm font-semibold text-[color:var(--ink-strong)]">{project.label}</p>
                           <p className="mt-1 text-xs text-[color:var(--muted)]">
-                            {project.runs.length} run{project.runs.length === 1 ? "" : "s"} · latest {formatDate(project.latest.run.last_updated_at)}
+                            {project.runs.length} run{project.runs.length === 1 ? "" : "s"} · latest {formatDate(project.latest.last_updated_at)}
                           </p>
                         </div>
-                        <StatusBadge label={project.latest.run.status} />
+                        <StatusBadge label={project.latest.status} />
                       </div>
                     </a>
                   );
@@ -338,19 +340,19 @@ export default async function Home(props: {
                       <p className="text-xs uppercase tracking-[0.16em] text-[color:var(--muted)]">Run history for this project</p>
                       <div className="mt-4 grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
                         {selectedProject.runs.map((run) => {
-                          const active = run.run.run_id === selectedRunResponse.run.run_id;
+                          const active = run.run_id === selectedRunResponse.run.run_id;
                           return (
                             <a
-                              key={run.run.run_id}
-                              href={`/?project=${encodeURIComponent(selectedProject.key)}&runId=${run.run.run_id}`}
+                              key={run.run_id}
+                              href={`/?project=${encodeURIComponent(selectedProject.key)}&runId=${run.run_id}`}
                               className={`rounded-[18px] border px-4 py-3 text-sm transition ${
                                 active
                                   ? "border-[color:var(--accent)] bg-white text-[color:var(--ink-strong)]"
                                   : "border-[color:var(--line)] bg-transparent text-[color:var(--muted)] hover:border-[color:var(--accent)]/60"
                               }`}
                             >
-                              <div className="font-semibold">{formatDate(run.run.created_at)}</div>
-                              <div className="mt-1 text-xs uppercase tracking-[0.16em]">{run.run.status}</div>
+                              <div className="font-semibold">{formatDate(run.created_at)}</div>
+                              <div className="mt-1 text-xs uppercase tracking-[0.16em]">{run.status}</div>
                             </a>
                           );
                         })}
@@ -370,7 +372,8 @@ export default async function Home(props: {
                           <input type="hidden" name="workflow_name" value={workflowName} />
                           <button
                             type="submit"
-                            className="w-full rounded-full border border-[color:var(--line)] bg-[color:var(--panel-soft)] px-4 py-2 text-sm font-semibold text-[color:var(--ink-strong)] transition hover:border-[color:var(--accent)] hover:text-[color:var(--accent-ink)]"
+                            disabled={hasActiveExecution}
+                            className="w-full rounded-full border border-[color:var(--line)] bg-[color:var(--panel-soft)] px-4 py-2 text-sm font-semibold text-[color:var(--ink-strong)] transition hover:border-[color:var(--accent)] hover:text-[color:var(--accent-ink)] disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             {label}
                           </button>
@@ -381,7 +384,8 @@ export default async function Home(props: {
                         <input type="hidden" name="project_key" value={selectedProject.key} />
                         <button
                           type="submit"
-                          className="w-full rounded-full bg-[color:var(--accent-ink)] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[color:var(--accent)]"
+                          disabled={hasActiveExecution}
+                          className="w-full rounded-full bg-[color:var(--accent-ink)] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[color:var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           Approve decomposition
                         </button>
@@ -457,6 +461,12 @@ export default async function Home(props: {
                         Submit changing feature requirements or architecture corrections here. The refinement workflow
                         updates the architecture pack and this diagram will refresh automatically while it runs.
                       </p>
+                      {hasActiveExecution ? (
+                        <p className="mt-3 text-xs uppercase tracking-[0.16em] text-[color:var(--accent-ink)]">
+                          A workflow is already active for this run. New chat input will be saved and the controls
+                          will unlock when that execution completes.
+                        </p>
+                      ) : null}
                       <div className="mt-5 max-h-[360px] space-y-3 overflow-auto pr-1">
                         {(selectedRunResponse.run.architecture_chat?.messages ?? []).map((message) => (
                           <div
@@ -481,12 +491,14 @@ export default async function Home(props: {
                           name="feedback"
                           rows={5}
                           required
-                          className="w-full rounded-[22px] border border-[color:var(--line)] bg-[color:var(--panel-soft)] px-4 py-3 text-sm leading-6 outline-none transition focus:border-[color:var(--accent)]"
+                          disabled={hasActiveExecution}
+                          className="w-full rounded-[22px] border border-[color:var(--line)] bg-[color:var(--panel-soft)] px-4 py-3 text-sm leading-6 outline-none transition focus:border-[color:var(--accent)] disabled:cursor-not-allowed disabled:opacity-60"
                           placeholder="Add a new feature, point out an issue in the architecture, or change the project requirements."
                         />
                         <button
                           type="submit"
-                          className="w-full rounded-full bg-[color:var(--accent)] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[color:var(--accent-ink)]"
+                          disabled={hasActiveExecution}
+                          className="w-full rounded-full bg-[color:var(--accent)] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[color:var(--accent-ink)] disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           Send refinement request
                         </button>
