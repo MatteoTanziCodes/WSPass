@@ -140,6 +140,24 @@ export function createRunsController(deps: {
           await runStore.readArtifact(runId, "architecture_pack");
         }
 
+        if (workflowName === "phase1-architecture-refinement") {
+          // Can't refine without a pack
+          await runStore.readArtifact(runId, "architecture_pack");
+        }
+
+        if (workflowName === "phase2-repo-provision") {
+          // Can't provision a repo without architecture
+          await runStore.readArtifact(runId, "architecture_pack");
+        }
+
+        if (workflowName === "phase2-decomposition") {
+          // Check repo is resolved
+          const run = await runStore.getRun(runId);
+          if (!run.repo_state) {
+            throw new RunConflictError("Cannot generate decomposition before target repo is resolved.");
+          }
+        }
+
         const useLocalExecution = shouldUseLocalWorkflowExecution();
         await runStore.queueExecution(
           runId,

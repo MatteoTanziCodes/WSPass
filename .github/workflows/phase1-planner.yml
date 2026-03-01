@@ -34,9 +34,15 @@ jobs:
       - name: Build shared package
         run: npm run build -w @pass/shared
 
+      - name: Debug API URL sources
+        run: |
+          echo "INPUT api_base_url='${{ inputs.api_base_url }}'"
+          echo "ENV PASS_API_BASE_URL='$PASS_API_BASE_URL'"
+
       - name: Run planner agent
         env:
           PASS_API_BASE_URL: ${{ inputs.api_base_url }}
+          PASS_API_PUBLIC_BASE_URL: ${{ inputs.api_base_url }}
           PASS_API_TOKEN: ${{ secrets.PASS_API_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL }}

@@ -89,6 +89,62 @@ function buildProjectGroups(runs: RunListItem[]) {
     );
 }
 
+function deriveGates(run: RunEnvelope, hasArchitecturePack: boolean, hasDecompositionPlan: boolean) {
+  const execActive = ["queued", "dispatched", "running"].includes(
+    run.run.execution?.status ?? ""
+  );
+  const repoResolved = Boolean(run.run.repo_state);
+  const decompStatus = run.run.decomposition_state?.status;
+  const decompApproved = decompStatus === "approved";
+  const decompDraft = decompStatus === "draft";
+
+  return {
+    execActive,                    // something is already running
+    canRunPlanner: !execActive,
+    canRefineArchitecture: !execActive && hasArchitecturePack,
+    canResolveRepo: !execActive && hasArchitecturePack,
+    canDecompose: !execActive && hasArchitecturePack && repoResolved,
+    canApproveDecomposition: !execActive && decompDraft,
+    canSyncIssues: !execActive && decompApproved && repoResolved,
+    decompIsStale: hasArchitecturePack && decompStatus === "not_started" && hasDecompositionPlan,
+  };
+}
+
+function PipelineTimeline({ run }: { run: RunEnvelope["run"] }) {
+  const steps = [
+    { key: "created",                label: "Created" },
+    { key: "plan",                    label: "Architecture" },
+    { key: "repo",                    label: "Repo" },
+    { key: "decompose",               label: "Decompose" },
+    { key: "approve",                 label: "Approved" },
+    { key: "export",                  label: "Issues synced" },
+  ] as const;
+
+  return (
+    <div className="flex items-center gap-1 overflow-x-auto">
+      {steps.map((step, i) => {
+        const reached = Boolean(run.step_timestamps?.[step.key]);
+        const isCurrent = run.current_step === step.key;
+        return (
+          <div key={step.key} className="flex items-center gap-1">
+            {i > 0 && <div className={`h-px w-5 ${reached ? "bg-[color:var(--accent)]" : "bg-[color:var(--line)]"}`} />}
+            <div
+              title={run.step_timestamps?.[step.key] ? new Date(run.step_timestamps[step.key]).toLocaleString() : "Not reached"}
+              className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-wide whitespace-nowrap ${
+                isCurrent  ? "bg-[color:var(--accent)] text-white" :
+                reached    ? "bg-[color:var(--panel-strong)] text-[color:var(--ink-strong)]" :
+                             "bg-transparent text-[color:var(--muted)] opacity-50"
+              }`}
+            >
+              {step.label}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default async function Home(props: {
   searchParams?: Promise<{ runId?: string; project?: string }>;
 }) {
@@ -119,6 +175,13 @@ export default async function Home(props: {
   const hasActiveExecution = selectedRunResponse
     ? ["queued", "dispatched", "running"].includes(selectedRunResponse.run.execution?.status ?? "")
     : false;
+  const gates = selectedRunResponse
+  ? deriveGates(
+      selectedRunResponse,
+      Boolean(architecturePack),
+      Boolean(decompositionPlan)
+    )
+  : null;
 
   return (
     <div className="min-h-screen bg-[color:var(--bg)] text-[color:var(--ink)]">
@@ -288,6 +351,24 @@ export default async function Home(props: {
               executionStatus={selectedRunResponse.run.execution?.status}
               workflowName={selectedRunResponse.run.execution?.workflow_name}
             >
+              {selectedRunResponse.run.execution?.status === "failed" && (
+                <div className="rounded-[24px] border border-red-300/60 bg-red-50 px-5 py-4 text-sm text-red-800">
+                  <p className="font-semibold">Last workflow failed</p>
+                  <p className="mt-1 font-mono text-xs opacity-80">
+                    {selectedRunResponse.run.execution.workflow_name} · {selectedRunResponse.run.execution.error_message ?? "No error message recorded"}
+                  </p>
+                  {selectedRunResponse.run.execution.github_run_url && (
+                    <a
+                      href={selectedRunResponse.run.execution.github_run_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-2 inline-block text-xs font-semibold underline"
+                    >
+                      View GitHub Actions log →
+                    </a>
+                  )}
+                </div>
+              )}
               <div className="space-y-6">
                 <section className="rounded-[32px] border border-[color:var(--line)] bg-[color:var(--panel)] p-6 shadow-[0_40px_100px_rgba(13,17,23,0.09)]">
                   <div className="flex flex-col gap-6 xl:flex-row xl:items-start xl:justify-between">
@@ -335,6 +416,10 @@ export default async function Home(props: {
                     </div>
                   </div>
 
+                  <div className="mt-4">
+                    <PipelineTimeline run={selectedRunResponse.run} />
+                  </div>
+
                   <div className="mt-6 grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
                     <div className="rounded-[24px] border border-[color:var(--line)] bg-[color:var(--panel-soft)] p-4">
                       <p className="text-xs uppercase tracking-[0.16em] text-[color:var(--muted)]">Run history for this project</p>
@@ -361,31 +446,34 @@ export default async function Home(props: {
 
                     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
                       {[
-                        ["phase1-planner", "Generate architecture"],
-                        ["phase2-repo-provision", "Resolve repo"],
-                        ["phase2-decomposition", "Generate decomposition"],
-                        ["phase2-implementation", "Sync approved issues"],
-                      ].map(([workflowName, label]) => (
-                        <form key={workflowName} action={dispatchWorkflowAction}>
+                        { workflow: "phase1-planner",               label: "Generate architecture", canRun: gates?.canRunPlanner },
+                        { workflow: "phase2-repo-provision",         label: "Resolve repo",          canRun: gates?.canResolveRepo },
+                        { workflow: "phase2-decomposition",          label: "Generate decomposition",canRun: gates?.canDecompose },
+                        { workflow: "phase2-implementation",         label: "Sync approved issues",  canRun: gates?.canSyncIssues },
+                      ].map(({ workflow, label, canRun }) => (
+                        <form key={workflow} action={dispatchWorkflowAction}>
                           <input type="hidden" name="run_id" value={selectedRunResponse.run.run_id} />
                           <input type="hidden" name="project_key" value={selectedProject.key} />
-                          <input type="hidden" name="workflow_name" value={workflowName} />
+                          <input type="hidden" name="workflow_name" value={workflow} />
                           <button
                             type="submit"
-                            disabled={hasActiveExecution}
-                            className="w-full rounded-full border border-[color:var(--line)] bg-[color:var(--panel-soft)] px-4 py-2 text-sm font-semibold text-[color:var(--ink-strong)] transition hover:border-[color:var(--accent)] hover:text-[color:var(--accent-ink)] disabled:cursor-not-allowed disabled:opacity-50"
+                            disabled={!canRun}
+                            title={!canRun ? (gates?.execActive ? "A workflow is already running" : "Prerequisites not met") : undefined}
+                            className="w-full rounded-full border border-[color:var(--line)] bg-[color:var(--panel-soft)] px-4 py-2 text-sm font-semibold text-[color:var(--ink-strong)] transition hover:border-[color:var(--accent)] hover:text-[color:var(--accent-ink)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-[color:var(--line)] disabled:hover:text-[color:var(--ink-strong)]"
                           >
                             {label}
                           </button>
                         </form>
                       ))}
+
                       <form action={approveDecompositionAction}>
                         <input type="hidden" name="run_id" value={selectedRunResponse.run.run_id} />
                         <input type="hidden" name="project_key" value={selectedProject.key} />
                         <button
                           type="submit"
-                          disabled={hasActiveExecution}
-                          className="w-full rounded-full bg-[color:var(--accent-ink)] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[color:var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={!gates?.canApproveDecomposition}
+                          title={!gates?.canApproveDecomposition ? "Decomposition must be in draft state to approve" : undefined}
+                          className="w-full rounded-full bg-[color:var(--accent-ink)] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[color:var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           Approve decomposition
                         </button>
@@ -512,6 +600,11 @@ export default async function Home(props: {
                       <h3 className="mt-2 text-2xl font-semibold tracking-[-0.04em] text-[color:var(--ink-strong)]">
                         Async work map
                       </h3>
+                      {gates?.decompIsStale && (
+                        <div className="mt-4 rounded-[18px] border border-amber-300/60 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                          ⚠ Architecture was refined — regenerate decomposition to keep it in sync.
+                        </div>
+                      )}
                       {decompositionPlan ? (
                         <>
                           <p className="mt-4 text-sm leading-7 text-[color:var(--muted)]">{decompositionPlan.summary}</p>
