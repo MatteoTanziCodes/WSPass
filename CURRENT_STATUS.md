@@ -18,10 +18,13 @@ Use [README.md](d:/Programming/Projects/WSPass/README.md) for the broader produc
 The repository currently supports a working planning rail and a working implementation issue-sync rail.
 It now also supports a working repo-resolution rail for attaching to an existing downstream repo or creating a new one.
 It also includes a first-stage dashboard and a dedicated decomposition rail between architecture and issue sync.
+The dashboard enforces pipeline gates, surfaces execution errors with workflow links, and includes a pipeline progress timeline.
+The decomposition state machine is complete and all four statuses are in use: `not_started`, `draft`, `approved`, and `synced`.
 
 The intended user input surface is intentionally small:
 
 - PRD text
+- optional org constraints YAML
 - whether the target repo exists already
 - new repo name if the repo does not exist
 - new repo visibility if the repo does not exist
@@ -44,6 +47,7 @@ Descriptions, repo bootstrap docs, issue plans, and other delivery artifacts are
 - Persist implementation issue sync state
 - Dispatch planner and implementation workflows
 - Protect agent callback endpoints with bearer auth
+- Enforce prerequisite checks before workflow dispatch and return 409 with a message when prerequisites are not met
 
 Main API entrypoints live under:
 
@@ -82,7 +86,8 @@ Architecture refinement lives under:
 
 - Decomposition agent reads the finalized architecture pack
 - Decomposition agent generates a granular backlog artifact of very small work items
-- Decomposition state is persisted onto the run as `draft`, then later `approved`, then `synced`
+- Decomposition state is persisted onto the run as `draft`, then `approved`, then `synced`
+- Decomposition state resets to `not_started` when architecture is refined after generation
 - Implementation issue sync is gated on decomposition approval
 
 Decomposition rail lives under:
@@ -93,9 +98,10 @@ Decomposition rail lives under:
 ### Implementation rail
 
 - Implementation agent reads `architecture_pack`
-- Implementation agent syncs GitHub issues from `implementation.github_issue_plan`
+- Implementation agent syncs GitHub issues from the approved decomposition plan
 - Issue sync state is persisted back onto the run
 - Summary artifacts are written for issue sync visibility
+- After issue sync completes, decomposition state is set to `synced`
 
 At the moment, issue sync exists as a runtime capability, but the intended product flow is to use it only after the architecture and decomposition have been reviewed and approved.
 
@@ -118,6 +124,13 @@ Implementation rail lives under:
 
 - The placeholder web app has been replaced with a first-stage dashboard
 - The dashboard can create runs, list repos the GitHub token can access, dispatch workflows, show the current architecture, accept chat refinement input, and display decomposition output
+- Org constraints YAML can be supplied at run creation time
+- Action buttons are gated on pipeline state and show disabled with a hover tooltip when prerequisites are not met
+- An error banner appears when a workflow fails, showing the error message and a direct link to the GitHub Actions run
+- A pipeline timeline shows step progress with timestamps (Created → Architecture → Repo → Decompose → Approved → Synced)
+- A stale decomposition warning appears when architecture has been refined after the last decomposition was generated
+- The decomposition status badge is color-coded: neutral for `not_started`, orange for `draft`, green for `approved`, blue for `synced`
+- Dark mode is available via a toggle in the sidebar and persists across sessions
 - The dashboard is server-driven and currently refresh-based, not real-time
 
 ## What has been tested
@@ -133,7 +146,12 @@ The following paths have been validated locally:
 - implementation-agent issue sync into GitHub with persisted run state
 - repo-wide typecheck and build after adding the dashboard, architecture refinement rail, and decomposition rail
 
-The new refinement, decomposition, and dashboard paths have been validated through typecheck and build, but they have not yet been smoke-tested end to end against live GitHub Actions in this repo.
+The following paths have been validated end to end against live GitHub Actions:
+
+- Phase 1 planner: `architecture_pack`, summary, and diagram artifacts generated and persisted; dashboard renders architecture diagram, data flows, and tradeoffs
+- Phase 2 decomposition: `decomposition_plan` generated and persisted; dashboard renders the async work map
+- Decomposition approval: run moves to `approved` state and persists across refresh
+- Actions-to-API communication: runners authenticate and write back through `PASS_API_PUBLIC_BASE_URL`
 
 ### Known working outputs
 
@@ -166,8 +184,8 @@ The following work is still planned or partially defined but not implemented end
 ### Product and UI
 
 - wireframe composer UI
-- conversational refinement UI
 - explicit architecture editing loop from the browser
+- live dashboard updates without manual refresh
 - command center and coordination dashboard
 
 ### Coordination and execution control
@@ -203,11 +221,12 @@ The following work is still planned or partially defined but not implemented end
 - The web app is not yet the full product experience described in the roadmap.
 - Local smoke testing still requires seeding execution state when GitHub workflow dispatch is bypassed.
 - The implementation rail currently syncs GitHub issues but does not yet execute code changes in downstream repos.
-- The new dashboard currently renders architecture cards and refinement chat, but it does not yet provide a true drag-and-edit wireframe composer.
+- The dashboard currently renders architecture cards, refinement chat, and decomposition output, but does not yet provide a true drag-and-edit wireframe composer.
 - Repo resolution currently supports attaching to an existing repo and personal-account repo creation logic, but it does not yet configure secrets, variables, workflows, or repo contents.
 - New repo descriptions are now derived automatically from the PRD when the user does not supply additional metadata.
 - Coordination state is described in the contract directionally, but not yet implemented as a first-class runtime rail.
 - Anthropic generation is working, but the planner client is intentionally split into multiple smaller generation steps for reliability.
+- The dashboard is refresh-based; it does not yet poll or stream workflow progress in real time.
 
 ## Current local configuration
 
@@ -259,6 +278,8 @@ PASS_API_PUBLIC_BASE_URL=http://localhost:3001
 PASS_API_TOKEN=choose-a-random-secret
 ```
 
+When running workflows via GitHub Actions, the runner cannot reach `localhost`. Set `PASS_API_PUBLIC_BASE_URL` to a publicly reachable URL (e.g. an ngrok tunnel) and add it as a GitHub repo variable alongside `PASS_API_TOKEN` and `ANTHROPIC_API_KEY` as repo secrets.
+
 ### Step 2: Anthropic settings
 
 Set the planner provider values:
@@ -281,7 +302,7 @@ ANTHROPIC_API_KEY=your-anthropic-key
 ANTHROPIC_MODEL=claude-sonnet-4-6
 ANTHROPIC_BASE_URL=https://api.anthropic.com/v1
 ANTHROPIC_VERSION=2023-06-01
-ANTHROPIC_TIMEOUT_MS=45000
+ANTHROPIC_TIMEOUT_MS=90000
 PASS_2A_VERSION=0.1.0
 ```
 
@@ -307,14 +328,14 @@ Recommended starting values:
 ANTHROPIC_CORE_MAX_TOKENS=350
 ANTHROPIC_CLARIFICATIONS_MAX_TOKENS=450
 ANTHROPIC_WORKFLOWS_MAX_TOKENS=500
-ANTHROPIC_REQUIREMENTS_MAX_TOKENS=700
+ANTHROPIC_REQUIREMENTS_MAX_TOKENS=1000
 ANTHROPIC_DOMAIN_MAX_TOKENS=650
-ANTHROPIC_ARCHITECTURE_MAX_TOKENS=800
+ANTHROPIC_ARCHITECTURE_MAX_TOKENS=1200
 ANTHROPIC_REFINEMENT_MAX_TOKENS=500
-ANTHROPIC_ARCHITECTURE_REFINEMENT_MAX_TOKENS=2600
+ANTHROPIC_ARCHITECTURE_REFINEMENT_MAX_TOKENS=5000
 ANTHROPIC_IMPLEMENTATION_OVERVIEW_MAX_TOKENS=550
-ANTHROPIC_DECOMPOSITION_MAX_TOKENS=3200
-ANTHROPIC_COVERAGE_MAX_TOKENS=500
+ANTHROPIC_DECOMPOSITION_MAX_TOKENS=5000
+ANTHROPIC_COVERAGE_MAX_TOKENS=1200
 ```
 
 ### Step 4: Workflow source repo
@@ -418,19 +439,21 @@ ANTHROPIC_API_KEY=your-anthropic-key
 ANTHROPIC_MODEL=claude-sonnet-4-6
 ANTHROPIC_BASE_URL=https://api.anthropic.com/v1
 ANTHROPIC_VERSION=2023-06-01
-ANTHROPIC_TIMEOUT_MS=45000
+ANTHROPIC_TIMEOUT_MS=90000
 PASS_2A_VERSION=0.1.0
 
 # Planner section budgets
 ANTHROPIC_CORE_MAX_TOKENS=350
 ANTHROPIC_CLARIFICATIONS_MAX_TOKENS=450
 ANTHROPIC_WORKFLOWS_MAX_TOKENS=500
-ANTHROPIC_REQUIREMENTS_MAX_TOKENS=700
+ANTHROPIC_REQUIREMENTS_MAX_TOKENS=1000
 ANTHROPIC_DOMAIN_MAX_TOKENS=650
-ANTHROPIC_ARCHITECTURE_MAX_TOKENS=800
+ANTHROPIC_ARCHITECTURE_MAX_TOKENS=1200
 ANTHROPIC_REFINEMENT_MAX_TOKENS=500
+ANTHROPIC_ARCHITECTURE_REFINEMENT_MAX_TOKENS=5000
 ANTHROPIC_IMPLEMENTATION_OVERVIEW_MAX_TOKENS=550
-ANTHROPIC_COVERAGE_MAX_TOKENS=500
+ANTHROPIC_DECOMPOSITION_MAX_TOKENS=5000
+ANTHROPIC_COVERAGE_MAX_TOKENS=1200
 
 # Workflow source repo
 GITHUB_WORKFLOW_REPOSITORY=owner/WSPass
@@ -578,7 +601,8 @@ node apps/agents/dist/cli/repoProvision.js --run-id=<run-id>
 
 ## Suggested next work
 
-1. Smoke-test the refinement workflow, decomposition workflow, and dashboard against live GitHub Actions.
-2. Add coordination-state persistence and pause or resume behavior.
-3. Upgrade the dashboard into a true editable wireframe surface.
-4. Add downstream repo generation and IaC scaffolding.
+1. Smoke-test the architecture refinement workflow end to end against live GitHub Actions.
+2. Add live dashboard polling or streaming so workflow progress updates without manual refresh.
+3. Add coordination-state persistence and pause or resume behavior.
+4. Upgrade the dashboard into a true editable wireframe surface.
+5. Add downstream repo generation and IaC scaffolding.
