@@ -119,7 +119,7 @@ function PipelineTimeline({ run }: { run: RunEnvelope["run"] }) {
     { key: "approve",                 label: "Approved" },
     { key: "export",                  label: "Issues synced" },
   ] as const;
-
+  
   return (
     <div className="flex items-center gap-1 overflow-x-auto">
       {steps.map((step, i) => {
