@@ -5,22 +5,39 @@ import {
   DecompositionPlanSchema,
   DecompositionStateSchema,
   PlannerRunInputSchema,
+  RepoStateSchema,
   RunExecutionSchema,
 } from "@pass/shared";
 import { z } from "zod";
 import { readServerEnv } from "./env";
 
+export class ApiRequestError extends Error {
+  status: number;
+  body: string;
+
+  constructor(message: string, status: number, body: string) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.body = body;
+  }
+}
+
+const RunListItemSchema = z.object({
+  run_id: z.uuid(),
+  created_at: z.string().datetime(),
+  status: z.string(),
+  current_step: z.string(),
+  last_updated_at: z.string().datetime(),
+  input: PlannerRunInputSchema.optional(),
+  execution: RunExecutionSchema.optional(),
+  repo_state: RepoStateSchema.optional(),
+  decomposition_state: DecompositionStateSchema.optional(),
+});
+
 const RunListSchema = z.object({
   total: z.number().int().nonnegative(),
-  runs: z.array(
-    z.object({
-      run_id: z.uuid(),
-      created_at: z.string().datetime(),
-      status: z.string(),
-      current_step: z.string(),
-      last_updated_at: z.string().datetime(),
-    })
-  ),
+  runs: z.array(RunListItemSchema),
 });
 
 const RunResourceSchema = z.object({
@@ -181,7 +198,11 @@ export async function dispatchWorkflow(
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Failed to dispatch ${workflowName}: ${response.status} ${text}`);
+    throw new ApiRequestError(
+      `Failed to dispatch ${workflowName}: ${response.status} ${text}`,
+      response.status,
+      text
+    );
   }
 }
 

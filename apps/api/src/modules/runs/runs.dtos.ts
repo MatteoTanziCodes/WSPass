@@ -21,11 +21,18 @@ export const CreateRunResponseSchema = z
   })
   .strict();
 
+export const RunListItemSchema = RunRecordSchema.extend({
+  input: PlannerRunInputSchema.optional(),
+  execution: RunExecutionSchema.optional(),
+  repo_state: RepoStateSchema.optional(),
+  decomposition_state: DecompositionStateSchema.optional(),
+}).strict();
+
 // Response will include an array of run records
 export const ListRunsResponseSchema = z
   .object({
     total: z.number().int().nonnegative(), // Count of runs returned
-    runs: z.array(RunRecordSchema),
+    runs: z.array(RunListItemSchema),
   })
   .strict();
 
