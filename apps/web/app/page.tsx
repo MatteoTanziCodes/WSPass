@@ -88,6 +88,27 @@ function buildProjectGroups(runs: RunEnvelope[]) {
     );
 }
 
+function deriveGates(run: RunEnvelope, hasArchitecturePack: boolean, hasDecompositionPlan: boolean) {
+  const execActive = ["queued", "dispatched", "running"].includes(
+    run.run.execution?.status ?? ""
+  );
+  const repoResolved = Boolean(run.run.repo_state);
+  const decompStatus = run.run.decomposition_state?.status;
+  const decompApproved = decompStatus === "approved";
+  const decompDraft = decompStatus === "draft";
+
+  return {
+    execActive,                    // something is already running
+    canRunPlanner: !execActive,
+    canRefineArchitecture: !execActive && hasArchitecturePack,
+    canResolveRepo: !execActive && hasArchitecturePack,
+    canDecompose: !execActive && hasArchitecturePack && repoResolved,
+    canApproveDecomposition: !execActive && decompDraft,
+    canSyncIssues: !execActive && decompApproved && repoResolved,
+    decompIsStale: hasArchitecturePack && decompStatus === "not_started" && hasDecompositionPlan,
+  };
+}
+
 export default async function Home(props: {
   searchParams?: Promise<{ runId?: string; project?: string }>;
 }) {
@@ -117,6 +138,13 @@ export default async function Home(props: {
   const selectedProjectKey = selectedProject?.key;
   const architecturePack = selectedRunId ? await getArchitecturePack(selectedRunId) : null;
   const decompositionPlan = selectedRunId ? await getDecompositionPlan(selectedRunId) : null;
+  const gates = selectedRunResponse
+  ? deriveGates(
+      selectedRunResponse,
+      Boolean(architecturePack),
+      Boolean(decompositionPlan)
+    )
+  : null;
 
   return (
     <div className="min-h-screen bg-[color:var(--bg)] text-[color:var(--ink)]">
@@ -359,29 +387,34 @@ export default async function Home(props: {
 
                     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
                       {[
-                        ["phase1-planner", "Generate architecture"],
-                        ["phase2-repo-provision", "Resolve repo"],
-                        ["phase2-decomposition", "Generate decomposition"],
-                        ["phase2-implementation", "Sync approved issues"],
-                      ].map(([workflowName, label]) => (
-                        <form key={workflowName} action={dispatchWorkflowAction}>
+                        { workflow: "phase1-planner",               label: "Generate architecture", canRun: gates?.canRunPlanner },
+                        { workflow: "phase2-repo-provision",         label: "Resolve repo",          canRun: gates?.canResolveRepo },
+                        { workflow: "phase2-decomposition",          label: "Generate decomposition",canRun: gates?.canDecompose },
+                        { workflow: "phase2-implementation",         label: "Sync approved issues",  canRun: gates?.canSyncIssues },
+                      ].map(({ workflow, label, canRun }) => (
+                        <form key={workflow} action={dispatchWorkflowAction}>
                           <input type="hidden" name="run_id" value={selectedRunResponse.run.run_id} />
                           <input type="hidden" name="project_key" value={selectedProject.key} />
-                          <input type="hidden" name="workflow_name" value={workflowName} />
+                          <input type="hidden" name="workflow_name" value={workflow} />
                           <button
                             type="submit"
-                            className="w-full rounded-full border border-[color:var(--line)] bg-[color:var(--panel-soft)] px-4 py-2 text-sm font-semibold text-[color:var(--ink-strong)] transition hover:border-[color:var(--accent)] hover:text-[color:var(--accent-ink)]"
+                            disabled={!canRun}
+                            title={!canRun ? (gates?.execActive ? "A workflow is already running" : "Prerequisites not met") : undefined}
+                            className="w-full rounded-full border border-[color:var(--line)] bg-[color:var(--panel-soft)] px-4 py-2 text-sm font-semibold text-[color:var(--ink-strong)] transition hover:border-[color:var(--accent)] hover:text-[color:var(--accent-ink)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-[color:var(--line)] disabled:hover:text-[color:var(--ink-strong)]"
                           >
                             {label}
                           </button>
                         </form>
                       ))}
+
                       <form action={approveDecompositionAction}>
                         <input type="hidden" name="run_id" value={selectedRunResponse.run.run_id} />
                         <input type="hidden" name="project_key" value={selectedProject.key} />
                         <button
                           type="submit"
-                          className="w-full rounded-full bg-[color:var(--accent-ink)] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[color:var(--accent)]"
+                          disabled={!gates?.canApproveDecomposition}
+                          title={!gates?.canApproveDecomposition ? "Decomposition must be in draft state to approve" : undefined}
+                          className="w-full rounded-full bg-[color:var(--accent-ink)] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[color:var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
                         >
                           Approve decomposition
                         </button>
