@@ -34,6 +34,9 @@ jobs:
       - name: Build shared package
         run: npm run build -w @pass/shared
 
+      - name: Debug PASS API URL
+        run: echo "PASS_API_BASE_URL=$PASS_API_BASE_URL"
+
       - name: Run planner agent
         env:
           PASS_API_BASE_URL: ${{ inputs.api_base_url || vars.PASS_API_BASE_URL }}
