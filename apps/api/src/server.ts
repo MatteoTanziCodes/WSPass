@@ -2,6 +2,8 @@ import { config as loadDotenv } from "dotenv";
 import { resolve } from "node:path";
 import Fastify from "fastify";
 import { registerRunsRoutes } from "./modules/runs/runs.routes";
+import { registerIntegrationRoutes } from "./modules/integrations/integrations.routes"; // ADD
+
 
 loadDotenv({ path: resolve(__dirname, "../../../.env") });
 
@@ -12,6 +14,8 @@ async function start() {
 
   // Registers the minimal run-tracking API (Step 2).
   await registerRunsRoutes(app);
+
+  await registerIntegrationRoutes(app);
 
   const port = Number(process.env.PORT ?? 3001);
   const host = "0.0.0.0";
