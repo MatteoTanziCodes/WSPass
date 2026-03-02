@@ -46,6 +46,21 @@ const GetRunResponseSchema = z
 
 type RunDetail = z.infer<typeof RunDetailSchema>;
 
+const BrandAssetSchema = z
+  .object({
+    id: z.string(),
+    type: z.string(),
+    name: z.string(),
+    usage_hint: z.string().optional(),
+  })
+  .strict();
+
+const GetBrandAssetsResponseSchema = z
+  .object({
+    assets: z.array(BrandAssetSchema).optional(),
+  })
+  .strict();
+
 type PassApiClientOptions = {
   baseUrl: string;
   token: string;
@@ -63,6 +78,32 @@ class PassApiClient {
   async getRun(runId: string): Promise<RunDetail> {
     const response = await this.request("GET", `/runs/${runId}`);
     return GetRunResponseSchema.parse(response).run;
+  }
+
+  async getBrandAssetsManifest(): Promise<string> {
+    try {
+      const response = await this.request("GET", "/admin/brand-assets", undefined, true);
+      const data = GetBrandAssetsResponseSchema.parse(response);
+
+      if (!data.assets || data.assets.length === 0) {
+        return "";
+      }
+
+      const lines = data.assets.map(
+        (asset) =>
+          `- brand:${asset.type}:${asset.name} (id: ${asset.id})${
+            asset.usage_hint ? ` — ${asset.usage_hint}` : ""
+          }`
+      );
+
+      return [
+        "Available brand assets:",
+        ...lines,
+        "When the PRD references a logo or font, include a brand_asset_refs array in the architecture pack with the matching id and name.",
+      ].join("\n");
+    } catch {
+      return "";
+    }
   }
 
   async updateRun(
@@ -300,6 +341,8 @@ export async function runPlannerAgent(runId: string): Promise<void> {
       throw new Error("Run input is missing.");
     }
 
+    const brandAssetsManifest = await api.getBrandAssetsManifest();
+
     const normalizedPrd = await normalizePrdToYaml(run.input.prd_text);
     const normalizedOrgConstraints = await normalizeOrgConstraintsToYaml(
       run.input.org_constraints_text
@@ -307,6 +350,11 @@ export async function runPlannerAgent(runId: string): Promise<void> {
     const normalizedDesignGuidelines = await normalizeDesignGuidelinesToYaml(
       run.input.design_guidelines_text
     );
+
+    // Append brand assets context to PRD text so the planner sees it without changing typed org constraints.
+    const plannerPrdText = brandAssetsManifest
+      ? `${run.input.prd_text}\n\n${brandAssetsManifest}`
+      : run.input.prd_text;
 
     await api.updateExecution(runId, {
       status: "running",
@@ -319,7 +367,7 @@ export async function runPlannerAgent(runId: string): Promise<void> {
     const pack = ArchitecturePackSchema.parse(
       await generateArchitecturePack({
         runId,
-        prdText: run.input.prd_text,
+        prdText: plannerPrdText,
         normalizedPrdYaml: normalizedPrd.yaml,
         orgConstraints: normalizedOrgConstraints.normalized,
         normalizedOrgConstraintsYaml: normalizedOrgConstraints.yaml,
