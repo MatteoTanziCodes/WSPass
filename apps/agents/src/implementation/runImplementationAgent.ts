@@ -1,5 +1,7 @@
 import { z } from "zod";
 import {
+  ArchitectureChatStateSchema,
+  DecompositionReviewStateSchema,
   DecompositionPlanSchema,
   DecompositionStateSchema,
   ImplementationIssueStateCollectionSchema,
@@ -22,7 +24,9 @@ const RunDetailSchema = z
     input: PlannerRunInputSchema.optional(),
     execution: RunExecutionSchema.optional(),
     repo_state: RepoStateSchema.optional(),
+    architecture_chat: ArchitectureChatStateSchema.optional(),
     decomposition_state: DecompositionStateSchema.optional(),
+    decomposition_review_state: DecompositionReviewStateSchema.optional(),
     implementation_state: ImplementationIssueStateCollectionSchema.optional(),
   })
   .strict();
@@ -89,6 +93,13 @@ class PassApiClient {
 
   async updateDecompositionState(runId: string, payload: z.infer<typeof DecompositionStateSchema>) {
     await this.request("PATCH", `/runs/${runId}/decomposition-state`, payload, true);
+  }
+
+  async updateDecompositionReviewState(
+    runId: string,
+    payload: z.infer<typeof DecompositionReviewStateSchema>
+  ) {
+    await this.request("PATCH", `/runs/${runId}/decomposition-review-state`, payload, true);
   }
 
   async uploadArtifact(
@@ -186,11 +197,18 @@ export async function runImplementationAgent(runId: string): Promise<void> {
       github_run_url: githubRunUrl,
     });
 
-    if (!run.decomposition_state || !["approved", "synced"].includes(run.decomposition_state.status)) {
-      throw new Error("Decomposition must be approved before implementation issue sync can run.");
+    if (!run.decomposition_review_state || !["build_ready", "synced"].includes(run.decomposition_review_state.status)) {
+      throw new Error("Decomposition review must be build-ready before implementation issue sync can run.");
     }
 
-    const artifactName = run.decomposition_state.artifact_name || "decomposition_plan";
+    const decompositionState =
+      run.decomposition_state ??
+      DecompositionStateSchema.parse({
+        status: "draft",
+        artifact_name: "decomposition_plan",
+        work_item_count: 0,
+      });
+    const artifactName = decompositionState.artifact_name || "decomposition_plan";
     const artifactResponse = await api.getArtifact(runId, artifactName);
     const plan = DecompositionPlanSchema.parse(artifactResponse.payload);
     const issuesClient = new GitHubIssuesClient({
@@ -250,10 +268,21 @@ export async function runImplementationAgent(runId: string): Promise<void> {
       payload: renderIssueSummary(normalizedState),
     });
     await api.updateDecompositionState(runId, {
-      ...run.decomposition_state,
+      ...decompositionState,
       status: "synced",
       artifact_name: artifactName,
       work_item_count: plan.work_items.length,
+    });
+    await api.updateDecompositionReviewState(runId, {
+      ...(run.decomposition_review_state ?? {
+        status: "build_ready",
+        artifact_name: "decomposition_review",
+        iteration_count: 0,
+        gap_count: 0,
+        open_question_count: 0,
+        questions: [],
+      }),
+      status: "synced",
     });
 
     await api.updateExecution(runId, {

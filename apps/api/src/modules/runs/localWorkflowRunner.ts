@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import type { WorkflowName } from "@pass/shared";
+import type { RunStore } from "./runStore";
 
 type DispatchLocalWorkflowInput = {
   workflowName: WorkflowName;
@@ -13,6 +14,7 @@ const workflowCliMap: Record<WorkflowName, string> = {
   "phase1-architecture-refinement": "architectureRefinement",
   "phase2-repo-provision": "repoProvision",
   "phase2-decomposition": "decomposition",
+  "phase2-decomposition-iterator": "decompositionIterator",
   "phase2-implementation": "implementation",
 };
 
@@ -55,6 +57,14 @@ export function shouldUseLocalWorkflowExecution() {
 function resolveCommand(workflowName: WorkflowName) {
   const root = repoRoot();
   const cliName = workflowCliMap[workflowName];
+  const builtCliPath = path.join(root, "apps", "agents", "dist", "cli", `${cliName}.js`);
+  if (fs.existsSync(builtCliPath)) {
+    return {
+      command: process.execPath,
+      args: [builtCliPath],
+    };
+  }
+
   const tsxPath = path.join(root, "node_modules", "tsx", "dist", "cli.mjs");
   const sourceCliPath = path.join(root, "apps", "agents", "src", "cli", `${cliName}.ts`);
   if (fs.existsSync(tsxPath) && fs.existsSync(sourceCliPath)) {
@@ -64,20 +74,18 @@ function resolveCommand(workflowName: WorkflowName) {
     };
   }
 
-  const builtCliPath = path.join(root, "apps", "agents", "dist", "cli", `${cliName}.js`);
-  if (fs.existsSync(builtCliPath)) {
-    return {
-      command: process.execPath,
-      args: [builtCliPath],
-    };
-  }
-
   throw new LocalWorkflowRunnerError(
     `Cannot resolve local agent entrypoint for ${workflowName}. Install dependencies or build @pass/agents.`
   );
 }
 
 export class LocalWorkflowRunner {
+  private readonly runStore?: RunStore;
+
+  constructor(opts?: { runStore?: RunStore }) {
+    this.runStore = opts?.runStore;
+  }
+
   async dispatchWorkflow(input: DispatchLocalWorkflowInput): Promise<void> {
     const root = repoRoot();
     const { command, args } = resolveCommand(input.workflowName);
@@ -85,6 +93,10 @@ export class LocalWorkflowRunner {
     fs.mkdirSync(logsDir, { recursive: true });
     const logPath = path.join(logsDir, `${input.workflowName}.log`);
     const logFd = fs.openSync(logPath, "a");
+    fs.writeFileSync(
+      logFd,
+      `\n[${new Date().toISOString()}] dispatch ${input.workflowName} run_id=${input.runId} command=${command} args=${args.join(" ")}\n`
+    );
 
     const child = spawn(command, [...args, `--run-id=${input.runId}`], {
       cwd: root,
@@ -104,7 +116,47 @@ export class LocalWorkflowRunner {
       );
     }
 
+    child.on("error", (error) => {
+      void this.handleChildFailure(input, logPath, `Local workflow process error: ${error.message}`);
+    });
+    child.on("exit", (code, signal) => {
+      if (code && code !== 0) {
+        const failureReason = signal
+          ? `Local workflow exited via signal ${signal}`
+          : `Local workflow exited with code ${code}`;
+        void this.handleChildFailure(input, logPath, failureReason);
+      }
+    });
+
     child.unref();
     fs.closeSync(logFd);
+  }
+
+  private async handleChildFailure(
+    input: DispatchLocalWorkflowInput,
+    logPath: string,
+    reason: string
+  ) {
+    try {
+      fs.appendFileSync(logPath, `[${new Date().toISOString()}] ${reason}\n`);
+    } catch {
+      // Ignore logging fallback failures.
+    }
+
+    if (!this.runStore) {
+      return;
+    }
+
+    try {
+      const run = await this.runStore.getRun(input.runId);
+      const status = run.execution?.status;
+      if (!status || !["queued", "dispatched", "running"].includes(status)) {
+        return;
+      }
+
+      await this.runStore.failExecution(input.runId, reason);
+    } catch {
+      // Ignore fallback execution update errors and preserve the original workflow logs.
+    }
   }
 }

@@ -2,8 +2,11 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 
 import {
+  AnswerDecompositionReviewQuestionRequestSchema,
+  AnswerDecompositionReviewQuestionResponseSchema,
   CreateRunRequestSchema,
   CreateRunResponseSchema,
+  DeleteRunResponseSchema,
   DispatchRunParamsSchema,
   DispatchRunResponseSchema,
   GetArtifactParamsSchema,
@@ -15,6 +18,8 @@ import {
   UpdateExecutionResponseSchema,
   UpdateArchitectureChatRequestSchema,
   UpdateArchitectureChatResponseSchema,
+  UpdateDecompositionReviewStateRequestSchema,
+  UpdateDecompositionReviewStateResponseSchema,
   UpdateDecompositionStateRequestSchema,
   UpdateDecompositionStateResponseSchema,
   UpdateImplementationStateRequestSchema,
@@ -42,6 +47,7 @@ import {
   RunConflictError,
   RunNotFoundError,
 } from "./runStore";
+import { ArchitecturePackSchema } from "@pass/shared";
 
 function resolveApiBaseUrl(request: FastifyRequest) {
   return process.env.PASS_API_PUBLIC_BASE_URL ?? `${request.protocol}://${request.headers.host}`;
@@ -51,6 +57,19 @@ export function createRunsController(deps: {
   runStore: RunStore;
 }) {
   const { runStore } = deps;
+
+  async function assertArchitectureClarificationsResolved(runId: string) {
+    const artifact = await runStore.readArtifact(runId, "architecture_pack");
+    const pack = ArchitecturePackSchema.parse(artifact.payload);
+    const hasDefaultedClarifications = pack.clarifications.some((item) => item.default_used);
+    const hasOpenQuestions = pack.open_questions.length > 0;
+
+    if (hasDefaultedClarifications || hasOpenQuestions) {
+      throw new RunConflictError(
+        "Cannot proceed beyond architecture while clarifying questions remain unanswered."
+      );
+    }
+  }
 
   return {
     async createRun(request: FastifyRequest, reply: FastifyReply) {
@@ -88,6 +107,22 @@ export function createRunsController(deps: {
       }
     },
 
+    async deleteRun(request: FastifyRequest, reply: FastifyReply) {
+      try {
+        const { runId } = RunIdParamsSchema.parse(request.params);
+        await runStore.deleteRun(runId);
+        return reply.send(DeleteRunResponseSchema.parse({ run_id: runId, deleted: true }));
+      } catch (err: any) {
+        if (err instanceof RunNotFoundError) {
+          return reply.code(404).send({ error: "run_not_found", message: err.message });
+        }
+        if (err instanceof z.ZodError) {
+          return reply.code(400).send({ error: "bad_request", issues: err.issues });
+        }
+        throw err;
+      }
+    },
+
     async updateRun(request: FastifyRequest, reply: FastifyReply) {
       try {
         const { runId } = RunIdParamsSchema.parse(request.params);
@@ -113,6 +148,7 @@ export function createRunsController(deps: {
         | "phase1-architecture-refinement"
         | "phase2-repo-provision"
         | "phase2-decomposition"
+        | "phase2-decomposition-iterator"
         | "phase2-implementation" =
         "phase1-planner";
 
@@ -131,12 +167,16 @@ export function createRunsController(deps: {
           if (!run.repo_state) {
             throw new RunConflictError("Cannot dispatch implementation before target repo is resolved.");
           }
-          if (!run.decomposition_state || run.decomposition_state.status !== "approved") {
-            throw new RunConflictError("Cannot dispatch implementation before decomposition is approved.");
+          if (!run.decomposition_review_state || run.decomposition_review_state.status !== "build_ready") {
+            throw new RunConflictError("Cannot dispatch implementation before decomposition review is build-ready.");
           }
         }
 
-        if (workflowName === "phase2-decomposition" || workflowName === "phase1-architecture-refinement") {
+        if (
+          workflowName === "phase2-decomposition" ||
+          workflowName === "phase2-decomposition-iterator" ||
+          workflowName === "phase1-architecture-refinement"
+        ) {
           await runStore.readArtifact(runId, "architecture_pack");
         }
 
@@ -148,13 +188,23 @@ export function createRunsController(deps: {
         if (workflowName === "phase2-repo-provision") {
           // Can't provision a repo without architecture
           await runStore.readArtifact(runId, "architecture_pack");
+          await assertArchitectureClarificationsResolved(runId);
         }
 
         if (workflowName === "phase2-decomposition") {
           // Check repo is resolved
           const run = await runStore.getRun(runId);
+          await assertArchitectureClarificationsResolved(runId);
           if (!run.repo_state) {
             throw new RunConflictError("Cannot generate decomposition before target repo is resolved.");
+          }
+        }
+
+        if (workflowName === "phase2-decomposition-iterator") {
+          const run = await runStore.getRun(runId);
+          await assertArchitectureClarificationsResolved(runId);
+          if (!run.repo_state) {
+            throw new RunConflictError("Cannot review decomposition before target repo is resolved.");
           }
         }
 
@@ -167,7 +217,7 @@ export function createRunsController(deps: {
         queued = true;
 
         if (useLocalExecution) {
-          const localWorkflowRunner = new LocalWorkflowRunner();
+          const localWorkflowRunner = new LocalWorkflowRunner({ runStore });
           await localWorkflowRunner.dispatchWorkflow({
             workflowName,
             runId,
@@ -344,6 +394,43 @@ export function createRunsController(deps: {
       } catch (err: any) {
         if (err instanceof RunNotFoundError) {
           return reply.code(404).send({ error: "run_not_found", message: err.message });
+        }
+        if (err instanceof z.ZodError) {
+          return reply.code(400).send({ error: "bad_request", issues: err.issues });
+        }
+        throw err;
+      }
+    },
+
+    async updateDecompositionReviewState(request: FastifyRequest, reply: FastifyReply) {
+      try {
+        const { runId } = RunIdParamsSchema.parse(request.params);
+        const body = UpdateDecompositionReviewStateRequestSchema.parse((request as { body?: unknown }).body);
+        const run = await runStore.updateDecompositionReviewState(runId, body);
+        return reply.send(UpdateDecompositionReviewStateResponseSchema.parse({ run }));
+      } catch (err: any) {
+        if (err instanceof RunNotFoundError) {
+          return reply.code(404).send({ error: "run_not_found", message: err.message });
+        }
+        if (err instanceof z.ZodError) {
+          return reply.code(400).send({ error: "bad_request", issues: err.issues });
+        }
+        throw err;
+      }
+    },
+
+    async answerDecompositionReviewQuestion(request: FastifyRequest, reply: FastifyReply) {
+      try {
+        const { runId } = RunIdParamsSchema.parse(request.params);
+        const body = AnswerDecompositionReviewQuestionRequestSchema.parse((request as { body?: unknown }).body);
+        const run = await runStore.answerDecompositionReviewQuestion(runId, body);
+        return reply.send(AnswerDecompositionReviewQuestionResponseSchema.parse({ run }));
+      } catch (err: any) {
+        if (err instanceof RunNotFoundError) {
+          return reply.code(404).send({ error: "run_not_found", message: err.message });
+        }
+        if (err instanceof RunConflictError) {
+          return reply.code(409).send({ error: "run_conflict", message: err.message });
         }
         if (err instanceof z.ZodError) {
           return reply.code(400).send({ error: "bad_request", issues: err.issues });

@@ -63,7 +63,11 @@ export type RepoTarget = z.infer<typeof RepoTargetSchema>;
 export const PlannerRunInputSchema = z
   .object({
     prd_text: z.string().min(1),
-    org_constraints_yaml: z.string().min(1).optional(),
+    prd_file_name: z.string().min(1).optional(),
+    org_constraints_text: z.string().min(1).optional(),
+    org_constraints_file_name: z.string().min(1).optional(),
+    design_guidelines_text: z.string().min(1).optional(),
+    design_guidelines_file_name: z.string().min(1).optional(),
     requested_by: z.string().min(1).optional(),
     source: PlannerRunSourceSchema.optional(),
     repo_target: RepoTargetSchema.optional(),
@@ -169,6 +173,88 @@ export const DecompositionPlanSchema = z
 
 export type DecompositionPlan = z.infer<typeof DecompositionPlanSchema>;
 
+export const ProjectContextSchema = z
+  .object({
+    generated_at: z.string().datetime(),
+    prd_summary: z.string().min(1),
+    org_constraints_summary: z.string().min(1),
+    design_guidelines_summary: z.string().min(1),
+    architecture_summary: z.string().min(1),
+    key_decisions: z.array(z.string().min(1)).default([]),
+    refinement_decisions: z.array(z.string().min(1)).default([]),
+    coverage_targets: z.array(z.string().min(1)).default([]),
+    unresolved_architecture_questions: z.array(z.string().min(1)).default([]),
+  })
+  .strict();
+
+export type ProjectContext = z.infer<typeof ProjectContextSchema>;
+
+export const DecompositionGapSchema = z
+  .object({
+    id: z.string().min(1),
+    type: z.enum(["missing_coverage", "duplicate_work", "stale_work", "oversized_work", "invalid_testing_work", "ambiguous_scope"]),
+    severity: z.enum(["low", "medium", "high"]),
+    summary: z.string().min(1),
+    affected_requirement_ids: z.array(z.string().min(1)).default([]),
+    affected_components: z.array(z.string().min(1)).default([]),
+    affected_work_item_ids: z.array(z.string().min(1)).default([]),
+    auto_resolved: z.boolean().default(false),
+    resolution_notes: z.string().min(1).optional(),
+  })
+  .strict();
+
+export type DecompositionGap = z.infer<typeof DecompositionGapSchema>;
+
+export const DecompositionClarifyingQuestionSchema = z
+  .object({
+    id: z.string().min(1),
+    prompt: z.string().min(1),
+    rationale: z.string().min(1),
+    status: z.enum(["open", "answered", "resolved"]),
+    answer: z.string().min(1).optional(),
+    created_at: z.string().datetime(),
+    answered_at: z.string().datetime().optional(),
+    resolved_at: z.string().datetime().optional(),
+    related_requirement_ids: z.array(z.string().min(1)).default([]),
+    related_components: z.array(z.string().min(1)).default([]),
+  })
+  .strict();
+
+export type DecompositionClarifyingQuestion = z.infer<
+  typeof DecompositionClarifyingQuestionSchema
+>;
+
+export const DecompositionReviewArtifactSchema = z
+  .object({
+    generated_at: z.string().datetime(),
+    summary: z.string().min(1),
+    result: z.enum(["clean", "blocked", "amended"]),
+    iteration_count: z.number().int().nonnegative(),
+    gaps: z.array(DecompositionGapSchema).default([]),
+    questions: z.array(DecompositionClarifyingQuestionSchema).default([]),
+    amendments_applied: z.array(z.string().min(1)).default([]),
+    coverage_snapshot: z.array(
+      z.object({
+        target_id: z.string().min(1),
+        target_type: z.enum([
+          "requirement",
+          "workflow",
+          "component",
+          "integration",
+          "data_store",
+          "async_pattern",
+          "api_surface",
+        ]),
+        summary: z.string().min(1),
+        covered_by: z.array(z.string().min(1)).default([]),
+        status: z.enum(["covered", "partial", "missing"]),
+      })
+    ).default([]),
+  })
+  .strict();
+
+export type DecompositionReviewArtifact = z.infer<typeof DecompositionReviewArtifactSchema>;
+
 export const DecompositionStatusSchema = z.enum(["not_started", "draft", "approved", "synced"]);
 export type DecompositionStatus = z.infer<typeof DecompositionStatusSchema>;
 
@@ -184,6 +270,33 @@ export const DecompositionStateSchema = z
   .strict();
 
 export type DecompositionState = z.infer<typeof DecompositionStateSchema>;
+
+export const DecompositionReviewStatusSchema = z.enum([
+  "not_started",
+  "iterating",
+  "blocked",
+  "build_ready",
+  "synced",
+]);
+
+export type DecompositionReviewStatus = z.infer<typeof DecompositionReviewStatusSchema>;
+
+export const DecompositionReviewStateSchema = z
+  .object({
+    status: DecompositionReviewStatusSchema,
+    artifact_name: z.string().min(1).default("decomposition_review"),
+    iteration_count: z.number().int().nonnegative().default(0),
+    last_reviewed_at: z.string().datetime().optional(),
+    source_decomposition_generated_at: z.string().datetime().optional(),
+    gap_count: z.number().int().nonnegative().default(0),
+    open_question_count: z.number().int().nonnegative().default(0),
+    clean_at: z.string().datetime().optional(),
+    blocked_reason: z.string().min(1).optional(),
+    questions: z.array(DecompositionClarifyingQuestionSchema).default([]),
+  })
+  .strict();
+
+export type DecompositionReviewState = z.infer<typeof DecompositionReviewStateSchema>;
 
 export const ImplementationIssueSyncStatusSchema = z.enum([
   "created",
@@ -218,4 +331,18 @@ export const ImplementationIssueStateCollectionSchema = z
 
 export type ImplementationIssueStateCollection = z.infer<
   typeof ImplementationIssueStateCollectionSchema
+>;
+
+export const DecompositionReviewQuestionAnswerRequestSchema = z
+  .object({
+    question_id: z.string().min(1),
+    answer: z.string().min(1),
+    prd_text: z.string().min(1).optional(),
+    org_constraints_text: z.string().min(1).optional(),
+    design_guidelines_text: z.string().min(1).optional(),
+  })
+  .strict();
+
+export type DecompositionReviewQuestionAnswerRequest = z.infer<
+  typeof DecompositionReviewQuestionAnswerRequestSchema
 >;

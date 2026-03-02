@@ -4,6 +4,8 @@ import { promises as fs } from "node:fs";
 
 import type {
   ArchitectureChatState,
+  DecompositionReviewQuestionAnswerRequest,
+  DecompositionReviewState,
   DecompositionState,
   ImplementationIssueStateCollection,
   PlannerRunInput,
@@ -137,6 +139,7 @@ export class RunStore {
         execution?: RunDetail["execution"];
         repo_state?: RunDetail["repo_state"];
         decomposition_state?: RunDetail["decomposition_state"];
+        decomposition_review_state?: RunDetail["decomposition_review_state"];
       }
     >
   > {
@@ -154,6 +157,7 @@ export class RunStore {
           execution: run.execution,
           repo_state: run.repo_state,
           decomposition_state: run.decomposition_state,
+          decomposition_review_state: run.decomposition_review_state,
         };
       })
     );
@@ -170,6 +174,16 @@ export class RunStore {
     } catch {
       throw new RunNotFoundError(runId);
     }
+  }
+
+  async deleteRun(runId: string): Promise<void> {
+    await this.getRun(runId);
+
+    await fs.rm(this.getRunDir(runId), { recursive: true, force: true });
+
+    const index = await this.readOrInitIndex();
+    const nextRuns = index.runs.filter((run) => run.run_id !== runId);
+    await writeJsonAtomic(this.indexPath, RunsIndexSchema.parse({ version: 1, runs: nextRuns }));
   }
 
   async updateRun(runId: string, patch: UpdateRunPatch): Promise<RunDetail> {
@@ -369,6 +383,60 @@ export class RunStore {
     return this.persistRun({
       ...existing,
       decomposition_state: decompositionState,
+    });
+  }
+
+  async updateDecompositionReviewState(
+    runId: string,
+    decompositionReviewState: DecompositionReviewState
+  ): Promise<RunDetail> {
+    const existing = await this.getRun(runId);
+    return this.persistRun({
+      ...existing,
+      decomposition_review_state: decompositionReviewState,
+    });
+  }
+
+  async answerDecompositionReviewQuestion(
+    runId: string,
+    answer: DecompositionReviewQuestionAnswerRequest
+  ): Promise<RunDetail> {
+    const existing = await this.getRun(runId);
+    const reviewState = existing.decomposition_review_state;
+
+    if (!reviewState) {
+      throw new RunConflictError("Decomposition review state has not been created for this run.");
+    }
+
+    const updatedQuestions = reviewState.questions.map((question) =>
+      question.id === answer.question_id
+        ? {
+            ...question,
+            status: "answered" as const,
+            answer: answer.answer,
+            answered_at: new Date().toISOString(),
+          }
+        : question
+    );
+
+    const targetQuestion = updatedQuestions.find((question) => question.id === answer.question_id);
+    if (!targetQuestion) {
+      throw new RunConflictError(
+        `Decomposition review question not found for run ${runId}: ${answer.question_id}`
+      );
+    }
+
+    return this.persistRun({
+      ...existing,
+      decomposition_review_state: {
+        ...reviewState,
+        status: "blocked",
+        questions: updatedQuestions,
+        open_question_count: updatedQuestions.filter((question) => question.status === "open").length,
+        blocked_reason: updatedQuestions.some((question) => question.status === "open")
+          ? reviewState.blocked_reason
+          : undefined,
+      },
     });
   }
 

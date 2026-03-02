@@ -2,14 +2,13 @@
 import { useEffect, useState } from "react";
 
 export function DarkModeToggle() {
-  const [dark, setDark] = useState(false);
+  const [dark, setDark] = useState(true);
 
   useEffect(() => {
     const saved = localStorage.getItem("wspass-dark");
-    if (saved === "1") {
-      document.documentElement.classList.add("dark");
-      setDark(true);
-    }
+    const nextDark = saved !== "0";
+    document.documentElement.classList.toggle("dark", nextDark);
+    setDark(nextDark);
   }, []);
 
   function toggle() {
@@ -22,9 +21,9 @@ export function DarkModeToggle() {
   return (
     <button
       onClick={toggle}
-      className="rounded-full border border-[color:var(--line)] px-3 py-1 text-xs font-semibold text-[color:var(--muted)] transition hover:border-[color:var(--accent)] hover:text-[color:var(--accent-ink)]"
+      className="border border-[color:var(--line-strong)] bg-[color:var(--panel-soft)] px-3 py-2 font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)] transition hover:border-[color:var(--accent)] hover:text-[color:var(--accent-ink)]"
     >
-      {dark ? "☀ Light" : "◐ Dark"}
+      {dark ? "Light Mode" : "Dark Mode"}
     </button>
   );
 }

@@ -2,7 +2,9 @@ import { z } from "zod";
 import {
   ArchitectureChatStateSchema,
   ArchitecturePackSchema,
+  DecompositionReviewStateSchema,
   DecompositionStateSchema,
+  ImplementationIssueStateCollectionSchema,
   PlannerRunInputSchema,
   RepoStateSchema,
   RunExecutionSchema,
@@ -10,7 +12,10 @@ import {
   RunStepSchema,
 } from "@pass/shared";
 import { renderMermaid, renderSummary } from "../planner/runPlannerAgent";
-import { refineArchitecturePack } from "../providers/llmClient";
+import {
+  generateArchitectureAssistantReply,
+  refineArchitecturePack,
+} from "../providers/llmClient";
 
 const RunDetailSchema = z
   .object({
@@ -25,6 +30,8 @@ const RunDetailSchema = z
     repo_state: RepoStateSchema.optional(),
     architecture_chat: ArchitectureChatStateSchema.optional(),
     decomposition_state: DecompositionStateSchema.optional(),
+    decomposition_review_state: DecompositionReviewStateSchema.optional(),
+    implementation_state: ImplementationIssueStateCollectionSchema.optional(),
   })
   .strict();
 
@@ -49,6 +56,10 @@ const GetArtifactResponseSchema = z
   .strict();
 
 type RunDetail = z.infer<typeof RunDetailSchema>;
+type ChatMessage = z.infer<typeof ArchitectureChatStateSchema>["messages"][number];
+
+const REFINEMENT_FAILURE_MARKER =
+  "I could not persist the revised architecture pack in this attempt because the refinement job failed:";
 
 class PassApiClient {
   private readonly baseUrl: string;
@@ -94,6 +105,13 @@ class PassApiClient {
 
   async updateDecompositionState(runId: string, payload: z.infer<typeof DecompositionStateSchema>) {
     await this.request("PATCH", `/runs/${runId}/decomposition-state`, payload, true);
+  }
+
+  async updateDecompositionReviewState(
+    runId: string,
+    payload: z.infer<typeof DecompositionReviewStateSchema>
+  ) {
+    await this.request("PATCH", `/runs/${runId}/decomposition-review-state`, payload, true);
   }
 
   async uploadArtifact(
@@ -145,6 +163,30 @@ function buildFailureMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isRefinementFailureNoise(message: ChatMessage) {
+  return (
+    message.role === "assistant" &&
+    message.content.includes(REFINEMENT_FAILURE_MARKER)
+  );
+}
+
+function buildEffectiveRefinementMessages(messages: ChatMessage[]) {
+  const filteredMessages = messages.filter((message) => !isRefinementFailureNoise(message));
+  const latestUserIndex = [...filteredMessages]
+    .map((message, index) => ({ message, index }))
+    .reverse()
+    .find(({ message }) => message.role === "user")?.index;
+
+  if (latestUserIndex === undefined) {
+    throw new Error("Architecture refinement requires at least one user chat message.");
+  }
+
+  return filteredMessages.slice(0, latestUserIndex + 1).map((message) => ({
+    role: message.role,
+    content: message.content,
+  }));
+}
+
 export async function runArchitectureRefinementAgent(runId: string): Promise<void> {
   const api = new PassApiClient({
     baseUrl: readRequiredEnv("PASS_API_BASE_URL"),
@@ -153,6 +195,9 @@ export async function runArchitectureRefinementAgent(runId: string): Promise<voi
 
   const githubRunId = process.env.GITHUB_RUN_ID ? Number(process.env.GITHUB_RUN_ID) : undefined;
   const githubRunUrl = process.env.GITHUB_RUN_URL;
+  let lastKnownChatState: z.infer<typeof ArchitectureChatStateSchema> | undefined;
+  let lastKnownPack: z.infer<typeof ArchitecturePackSchema> | undefined;
+  let fallbackAssistantReply: string | undefined;
 
   try {
     const run = await api.getRun(runId);
@@ -164,10 +209,10 @@ export async function runArchitectureRefinementAgent(runId: string): Promise<voi
         messages: [],
       }
     );
-    const latestUserMessage = [...chatState.messages].reverse().find((message) => message.role === "user");
-    if (!latestUserMessage) {
-      throw new Error("Architecture refinement requires at least one user chat message.");
-    }
+    const effectiveMessages = buildEffectiveRefinementMessages(chatState.messages);
+
+    lastKnownChatState = chatState;
+    lastKnownPack = currentPack;
 
     await api.updateExecution(runId, {
       status: "running",
@@ -175,13 +220,16 @@ export async function runArchitectureRefinementAgent(runId: string): Promise<voi
       github_run_url: githubRunUrl,
     });
 
-    const updatedPack = await refineArchitecturePack({
+    fallbackAssistantReply = await generateArchitectureAssistantReply({
       currentPack,
-      messages: chatState.messages.map((message) => ({
-        role: message.role,
-        content: message.content,
-      })),
+      messages: effectiveMessages,
     });
+
+    const refinementResult = await refineArchitecturePack({
+      currentPack,
+      messages: effectiveMessages,
+    });
+    const updatedPack = refinementResult.updatedPack;
 
     const nextChatState = ArchitectureChatStateSchema.parse({
       updated_at: new Date().toISOString(),
@@ -190,7 +238,7 @@ export async function runArchitectureRefinementAgent(runId: string): Promise<voi
         {
           id: `assistant_${Date.now()}`,
           role: "assistant",
-          content: "Architecture pack updated to reflect the latest refinement request.",
+          content: refinementResult.assistantResponse,
           created_at: new Date().toISOString(),
         },
       ],
@@ -223,6 +271,14 @@ export async function runArchitectureRefinementAgent(runId: string): Promise<voi
       artifact_name: "decomposition_plan",
       work_item_count: 0,
     });
+    await api.updateDecompositionReviewState(runId, {
+      status: "not_started",
+      artifact_name: "decomposition_review",
+      iteration_count: 0,
+      gap_count: 0,
+      open_question_count: 0,
+      questions: [],
+    });
     await api.updateRun(runId, {
       status: "plan_generated",
       current_step: "plan",
@@ -234,6 +290,48 @@ export async function runArchitectureRefinementAgent(runId: string): Promise<voi
     });
   } catch (error) {
     const message = buildFailureMessage(error);
+    if (lastKnownChatState && lastKnownPack) {
+      try {
+        const fallbackReply =
+          fallbackAssistantReply ??
+          (await generateArchitectureAssistantReply({
+            currentPack: lastKnownPack,
+            messages: buildEffectiveRefinementMessages(lastKnownChatState.messages),
+          }));
+
+        const failureChatState = ArchitectureChatStateSchema.parse({
+          updated_at: new Date().toISOString(),
+          messages: [
+            ...lastKnownChatState.messages,
+            {
+              id: `assistant_${Date.now()}`,
+              role: "assistant",
+              content: `${fallbackReply}\n\nI could not persist the revised architecture pack in this attempt because the refinement job failed: ${message}`,
+              created_at: new Date().toISOString(),
+            },
+          ],
+        });
+
+        await api.uploadArtifact(runId, {
+          name: "architecture_chat",
+          content_type: "application/json",
+          payload: failureChatState,
+        });
+        await api.updateArchitectureChat(runId, failureChatState);
+      } catch {
+        // Preserve the original failure if fallback chat generation also fails.
+      }
+    }
+
+    try {
+      await api.updateRun(runId, {
+        status: "failed",
+        current_step: "plan",
+      });
+    } catch {
+      // Preserve the original failure if run status cannot be updated.
+    }
+
     try {
       await api.updateExecution(runId, {
         status: "failed",

@@ -1,5 +1,9 @@
 import { z } from "zod";
 import {
+  ArchitectureChatStateSchema,
+  DecompositionReviewStateSchema,
+  DecompositionStateSchema,
+  ImplementationIssueStateCollectionSchema,
   PlannerRunInputSchema,
   RepoStateSchema,
   RepoTargetSchema,
@@ -20,6 +24,10 @@ const RunDetailSchema = z
     input: PlannerRunInputSchema.optional(),
     execution: RunExecutionSchema.optional(),
     repo_state: RepoStateSchema.optional(),
+    architecture_chat: ArchitectureChatStateSchema.optional(),
+    decomposition_state: DecompositionStateSchema.optional(),
+    decomposition_review_state: DecompositionReviewStateSchema.optional(),
+    implementation_state: ImplementationIssueStateCollectionSchema.optional(),
   })
   .strict();
 
@@ -243,7 +251,21 @@ export async function runRepoProvisionAgent(runId: string): Promise<void> {
         ? splitRepository(repoTarget.repository)
         : { owner: repoTarget.owner!, name: repoTarget.name! };
       const repository = await gitHub.getRepository(existingRef.owner, existingRef.name);
-      repoState = toRepoState("use_existing_repo", "existing", repository);
+      const requestedName = repoTarget.name?.trim();
+      const requestedVisibility = repoTarget.visibility;
+      const shouldRename = Boolean(requestedName && requestedName !== repository.name);
+      const shouldChangeVisibility =
+        requestedVisibility !== undefined &&
+        requestedVisibility !== (repository.private ? "private" : "public");
+
+      const finalRepository =
+        shouldRename || shouldChangeVisibility
+          ? await gitHub.updateRepository(existingRef.owner, existingRef.name, {
+              name: shouldRename ? requestedName : undefined,
+              visibility: shouldChangeVisibility ? requestedVisibility : undefined,
+            })
+          : repository;
+      repoState = toRepoState("use_existing_repo", "existing", finalRepository);
     } else {
       const repositoryName = repoTarget.name ?? splitRepository(repoTarget.repository!).name;
       const repository = await gitHub.createRepository({

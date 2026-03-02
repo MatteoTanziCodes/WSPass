@@ -2,6 +2,8 @@ import { z } from "zod";
 import { ArtifactMetadataSchema, RunDetailSchema, RunRecordSchema } from "./runs.schemas";
 import {
   ArchitectureChatStateSchema,
+  DecompositionReviewQuestionAnswerRequestSchema,
+  DecompositionReviewStateSchema,
   DecompositionStateSchema,
   ImplementationIssueStateCollectionSchema,
   PlannerRunInputSchema,
@@ -26,6 +28,7 @@ export const RunListItemSchema = RunRecordSchema.extend({
   execution: RunExecutionSchema.optional(),
   repo_state: RepoStateSchema.optional(),
   decomposition_state: DecompositionStateSchema.optional(),
+  decomposition_review_state: DecompositionReviewStateSchema.optional(),
 }).strict();
 
 // Response will include an array of run records
@@ -44,6 +47,13 @@ export const GetRunResponseSchema = z
   .object({
     run: RunDetailSchema,
     artifacts: z.array(ArtifactMetadataSchema),
+  })
+  .strict();
+
+export const DeleteRunResponseSchema = z
+  .object({
+    run_id: z.uuid(),
+    deleted: z.literal(true),
   })
   .strict();
 
@@ -148,6 +158,23 @@ export const UpdateArchitectureChatResponseSchema = z
 export const UpdateDecompositionStateRequestSchema = DecompositionStateSchema;
 
 export const UpdateDecompositionStateResponseSchema = z
+  .object({
+    run: RunDetailSchema,
+  })
+  .strict();
+
+export const UpdateDecompositionReviewStateRequestSchema = DecompositionReviewStateSchema;
+
+export const UpdateDecompositionReviewStateResponseSchema = z
+  .object({
+    run: RunDetailSchema,
+  })
+  .strict();
+
+export const AnswerDecompositionReviewQuestionRequestSchema =
+  DecompositionReviewQuestionAnswerRequestSchema;
+
+export const AnswerDecompositionReviewQuestionResponseSchema = z
   .object({
     run: RunDetailSchema,
   })

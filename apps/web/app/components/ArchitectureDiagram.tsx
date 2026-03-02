@@ -280,30 +280,30 @@ export function ArchitectureDiagram(props: { pack: ArchitecturePackLike }) {
   const viewY = Math.max(0, (svgHeight - viewHeight) / 2);
 
   return (
-    <div className="overflow-hidden rounded-[30px] border border-[color:var(--line)] bg-[linear-gradient(180deg,rgba(245,246,248,0.95),rgba(234,236,239,0.92))] p-3 sm:p-4">
+    <div className="overflow-hidden border border-[color:var(--line)] bg-[color:var(--bg-elevated)] p-3 sm:p-4">
       <div className="mb-3 flex items-center justify-between gap-3">
-        <p className="text-xs uppercase tracking-[0.16em] text-[color:var(--muted)]">
+        <p className="font-mono text-xs uppercase tracking-[0.16em] text-[color:var(--muted)]">
           Zoom {Math.round(zoom * 100)}%
         </p>
         <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={() => setZoom((value) => clampZoom(value - ZOOM_STEP))}
-            className="rounded-full border border-[color:var(--line)] bg-white/75 px-3 py-1.5 text-sm font-semibold text-[color:var(--ink-strong)] transition hover:border-[color:var(--accent)]"
+            className="border border-[color:var(--line)] bg-[color:var(--panel-soft)] px-3 py-1.5 text-sm font-semibold text-[color:var(--ink-strong)] transition hover:border-[color:var(--accent)]"
           >
             -
           </button>
           <button
             type="button"
             onClick={() => setZoom(1)}
-            className="rounded-full border border-[color:var(--line)] bg-white/75 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.14em] text-[color:var(--ink-strong)] transition hover:border-[color:var(--accent)]"
+            className="border border-[color:var(--line)] bg-[color:var(--panel-soft)] px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.14em] text-[color:var(--ink-strong)] transition hover:border-[color:var(--accent)]"
           >
             Reset
           </button>
           <button
             type="button"
             onClick={() => setZoom((value) => clampZoom(value + ZOOM_STEP))}
-            className="rounded-full border border-[color:var(--line)] bg-white/75 px-3 py-1.5 text-sm font-semibold text-[color:var(--ink-strong)] transition hover:border-[color:var(--accent)]"
+            className="border border-[color:var(--line)] bg-[color:var(--panel-soft)] px-3 py-1.5 text-sm font-semibold text-[color:var(--ink-strong)] transition hover:border-[color:var(--accent)]"
           >
             +
           </button>
@@ -333,12 +333,10 @@ export function ArchitectureDiagram(props: { pack: ArchitecturePackLike }) {
             <rect
               x={layer.x}
               y={layer.y}
-              rx="18"
-              ry="18"
               width={layer.width}
               height={layer.height}
-              fill="rgba(201, 219, 231, 0.58)"
-              stroke="rgba(120, 138, 158, 0.45)"
+              fill="rgba(211, 228, 242, 0.58)"
+              stroke="rgba(77, 115, 154, 0.45)"
               strokeWidth="1.2"
             />
             <text x={layer.x + 14} y={layer.y + 22} fill="#536171" fontSize="11" fontWeight="600">
@@ -364,8 +362,6 @@ export function ArchitectureDiagram(props: { pack: ArchitecturePackLike }) {
             <rect
               x={node.x}
               y={node.y}
-              rx="16"
-              ry="16"
               width={node.width}
               height={node.height}
               fill="rgba(255,255,255,0.94)"

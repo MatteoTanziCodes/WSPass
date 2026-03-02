@@ -1,8 +1,11 @@
 import { z } from "zod";
 import {
+  ArchitectureChatStateSchema,
   ArchitecturePackSchema,
+  DecompositionReviewStateSchema,
   DecompositionPlanSchema,
   DecompositionStateSchema,
+  ImplementationIssueStateCollectionSchema,
   PlannerRunInputSchema,
   RepoStateSchema,
   RunExecutionSchema,
@@ -22,7 +25,10 @@ const RunDetailSchema = z
     input: PlannerRunInputSchema.optional(),
     execution: RunExecutionSchema.optional(),
     repo_state: RepoStateSchema.optional(),
+    architecture_chat: ArchitectureChatStateSchema.optional(),
     decomposition_state: DecompositionStateSchema.optional(),
+    decomposition_review_state: DecompositionReviewStateSchema.optional(),
+    implementation_state: ImplementationIssueStateCollectionSchema.optional(),
   })
   .strict();
 
@@ -88,6 +94,13 @@ class PassApiClient {
     await this.request("PATCH", `/runs/${runId}/decomposition-state`, payload, true);
   }
 
+  async updateDecompositionReviewState(
+    runId: string,
+    payload: z.infer<typeof DecompositionReviewStateSchema>
+  ) {
+    await this.request("PATCH", `/runs/${runId}/decomposition-review-state`, payload, true);
+  }
+
   async uploadArtifact(
     runId: string,
     artifact: {
@@ -137,7 +150,7 @@ function buildFailureMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function renderSummary(plan: z.infer<typeof DecompositionPlanSchema>) {
+export function renderSummary(plan: z.infer<typeof DecompositionPlanSchema>) {
   return [
     "# Decomposition Plan",
     "",
@@ -189,6 +202,18 @@ export async function runDecompositionAgent(runId: string): Promise<void> {
       artifact_name: "decomposition_plan",
       generated_at: plan.generated_at,
       work_item_count: plan.work_items.length,
+    });
+    await api.updateDecompositionReviewState(runId, {
+      status: "not_started",
+      artifact_name: "decomposition_review",
+      iteration_count: 0,
+      last_reviewed_at: undefined,
+      source_decomposition_generated_at: plan.generated_at,
+      gap_count: 0,
+      open_question_count: 0,
+      clean_at: undefined,
+      blocked_reason: undefined,
+      questions: [],
     });
     await api.updateRun(runId, {
       status: "decomposition_generated",

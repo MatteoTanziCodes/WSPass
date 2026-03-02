@@ -12,6 +12,7 @@ export function registerRunsRoutes(app: FastifyInstance) {
   app.get("/runs/:runId", controller.getRun);   // Fetches a specific run by ID, returning its details and artifacts metadata.
   app.get("/runs/:runId/artifacts/:artifactName", controller.getArtifact);  // Fetches a specific artifact by name for a given run, returning its metadata and payload.
   app.patch("/runs/:runId", controller.updateRun);  // Updates a run's status and/or current step, 
+  app.delete("/runs/:runId", { preHandler: requireAgentAuth }, controller.deleteRun);
 
   app.post("/runs/:runId/dispatch", { preHandler: requireAgentAuth }, controller.dispatchRun);  // Dispatches a run for execution, returns the updated run details.
   app.post(
@@ -45,6 +46,16 @@ export function registerRunsRoutes(app: FastifyInstance) {
     "/runs/:runId/decomposition-state",
     { preHandler: requireAgentAuth },
     controller.updateDecompositionState
+  );
+  app.patch(
+    "/runs/:runId/decomposition-review-state",
+    { preHandler: requireAgentAuth },
+    controller.updateDecompositionReviewState
+  );
+  app.patch(
+    "/runs/:runId/decomposition-review-questions",
+    { preHandler: requireAgentAuth },
+    controller.answerDecompositionReviewQuestion
   );
   app.patch(
     "/runs/:runId/implementation-state",

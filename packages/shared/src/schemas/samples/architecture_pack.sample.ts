@@ -17,6 +17,13 @@ export const architecturePackSample = {
   },
 
   org_constraints: {},
+  design_guidelines: {
+    visual_direction: ["Console-like dark UI with flat panels and no rounded corners"],
+    color_guidance: ["Use high-contrast dark neutrals with a restrained orange accent"],
+    typography_guidance: ["Prefer dense monospace labels and strong sans-serif section headings"],
+    engineering_guidance: ["Keep project progression explicit and sequential in the UI"],
+    linting_guidance: ["Preserve strict TypeScript and predictable naming"],
+  },
 
   clarifications: [],
   actors: ["End User", "Implementation Agent"],

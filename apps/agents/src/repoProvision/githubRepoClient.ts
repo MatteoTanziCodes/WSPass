@@ -17,6 +17,12 @@ type CreateRepositoryInput = {
   templateRepository?: string;
 };
 
+type UpdateRepositoryInput = {
+  name?: string;
+  description?: string;
+  visibility?: "private" | "public";
+};
+
 function readGitHubToken() {
   const token =
     process.env.PASS_GITHUB_WORKFLOW_TOKEN ??
@@ -73,6 +79,14 @@ export class GitHubRepoClient {
       description: input.description,
       private: input.visibility !== "public",
       auto_init: true,
+    });
+  }
+
+  async updateRepository(owner: string, repo: string, input: UpdateRepositoryInput) {
+    return this.request<GitHubRepositoryResponse>("PATCH", `/repos/${owner}/${repo}`, {
+      ...(input.name ? { name: input.name } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.visibility ? { private: input.visibility !== "public" } : {}),
     });
   }
 

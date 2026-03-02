@@ -36,10 +36,10 @@ export function LiveRefreshShell(props: {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between rounded-[22px] border border-[color:var(--line)] bg-[color:var(--panel-soft)] px-4 py-3 text-sm text-[color:var(--muted)]">
+      <div className="flex items-center justify-between border border-[color:var(--line)] bg-[color:var(--panel-soft)] px-4 py-3 text-sm text-[color:var(--muted)]">
         <div className="flex items-center gap-3">
           <span
-            className={`h-2.5 w-2.5 rounded-full ${
+            className={`h-2.5 w-2.5 ${
               pulse ? "animate-pulse bg-[color:var(--accent)]" : "bg-[color:var(--line-strong)]"
             }`}
           />

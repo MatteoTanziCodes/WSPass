@@ -1,19 +1,23 @@
-import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import {
   ArchitectureChatStateSchema,
   ArchitecturePackSchema,
+  DecompositionReviewStateSchema,
   DecompositionStateSchema,
-  OrgConstraintsSchema,
+  ImplementationIssueStateCollectionSchema,
   PlannerRunInputSchema,
   RepoStateSchema,
   RunExecutionSchema,
   RunStatusSchema,
   RunStepSchema,
   type ArchitecturePack,
-  type OrgConstraints,
 } from "@pass/shared";
-import { generateArchitecturePack } from "../providers/llmClient";
+import {
+  generateArchitecturePack,
+  normalizeDesignGuidelinesToYaml,
+  normalizeOrgConstraintsToYaml,
+  normalizePrdToYaml,
+} from "../providers/llmClient";
 
 const RunDetailSchema = z
   .object({
@@ -26,6 +30,10 @@ const RunDetailSchema = z
     input: PlannerRunInputSchema.optional(),
     execution: RunExecutionSchema.optional(),
     repo_state: RepoStateSchema.optional(),
+    architecture_chat: ArchitectureChatStateSchema.optional(),
+    decomposition_state: DecompositionStateSchema.optional(),
+    decomposition_review_state: DecompositionReviewStateSchema.optional(),
+    implementation_state: ImplementationIssueStateCollectionSchema.optional(),
   })
   .strict();
 
@@ -95,6 +103,13 @@ class PassApiClient {
     await this.request("PATCH", `/runs/${runId}/decomposition-state`, payload, true);
   }
 
+  async updateDecompositionReviewState(
+    runId: string,
+    payload: z.infer<typeof DecompositionReviewStateSchema>
+  ): Promise<void> {
+    await this.request("PATCH", `/runs/${runId}/decomposition-review-state`, payload, true);
+  }
+
   private async request(method: string, path: string, body?: unknown, authenticated = false) {
     const headers: Record<string, string> = {
       Accept: "application/json",
@@ -124,15 +139,6 @@ class PassApiClient {
 
     return json;
   }
-}
-
-function parseOrgConstraints(input?: string): OrgConstraints {
-  if (!input?.trim()) {
-    return OrgConstraintsSchema.parse({});
-  }
-
-  const parsed = parseYaml(input);
-  return OrgConstraintsSchema.parse(parsed ?? {});
 }
 
 function toNodeId(name: string) {
@@ -179,6 +185,17 @@ export function renderSummary(pack: ArchitecturePack) {
     "",
     "## Rationale",
     architecture.rationale,
+    "",
+    "## Design Guidelines",
+    ...(pack.design_guidelines.visual_direction.length > 0
+      ? pack.design_guidelines.visual_direction.map((value) => `- Visual direction: ${value}`)
+      : ["- Visual direction: None"]),
+    ...pack.design_guidelines.color_guidance.map((value) => `- Color guidance: ${value}`),
+    ...pack.design_guidelines.typography_guidance.map((value) => `- Typography guidance: ${value}`),
+    ...pack.design_guidelines.interaction_guidance.map((value) => `- Interaction guidance: ${value}`),
+    ...pack.design_guidelines.accessibility_guidance.map((value) => `- Accessibility guidance: ${value}`),
+    ...pack.design_guidelines.engineering_guidance.map((value) => `- Engineering guidance: ${value}`),
+    ...pack.design_guidelines.linting_guidance.map((value) => `- Linting guidance: ${value}`),
     "",
     "## Wireframe Editing",
     `- Enabled: ${pack.refinement.wireframe.enabled}`,
@@ -283,7 +300,13 @@ export async function runPlannerAgent(runId: string): Promise<void> {
       throw new Error("Run input is missing.");
     }
 
-    const orgConstraints = parseOrgConstraints(run.input.org_constraints_yaml);
+    const normalizedPrd = await normalizePrdToYaml(run.input.prd_text);
+    const normalizedOrgConstraints = await normalizeOrgConstraintsToYaml(
+      run.input.org_constraints_text
+    );
+    const normalizedDesignGuidelines = await normalizeDesignGuidelinesToYaml(
+      run.input.design_guidelines_text
+    );
 
     await api.updateExecution(runId, {
       status: "running",
@@ -297,11 +320,31 @@ export async function runPlannerAgent(runId: string): Promise<void> {
       await generateArchitecturePack({
         runId,
         prdText: run.input.prd_text,
-        orgConstraints,
+        normalizedPrdYaml: normalizedPrd.yaml,
+        orgConstraints: normalizedOrgConstraints.normalized,
+        normalizedOrgConstraintsYaml: normalizedOrgConstraints.yaml,
+        designGuidelines: normalizedDesignGuidelines.normalized,
+        normalizedDesignGuidelinesYaml: normalizedDesignGuidelines.yaml,
       })
     );
 
     await api.updateRun(runId, { status: "plan_generated", current_step: "plan" });
+
+    await api.uploadArtifact(runId, {
+      name: "normalized_prd",
+      content_type: "text/plain",
+      payload: normalizedPrd.yaml,
+    });
+    await api.uploadArtifact(runId, {
+      name: "normalized_org_constraints",
+      content_type: "text/plain",
+      payload: normalizedOrgConstraints.yaml,
+    });
+    await api.uploadArtifact(runId, {
+      name: "normalized_design_guidelines",
+      content_type: "text/plain",
+      payload: normalizedDesignGuidelines.yaml,
+    });
 
     await api.uploadArtifact(runId, {
       name: "architecture_pack",
@@ -340,6 +383,14 @@ export async function runPlannerAgent(runId: string): Promise<void> {
       status: "not_started",
       artifact_name: "decomposition_plan",
       work_item_count: 0,
+    });
+    await api.updateDecompositionReviewState(runId, {
+      status: "not_started",
+      artifact_name: "decomposition_review",
+      iteration_count: 0,
+      gap_count: 0,
+      open_question_count: 0,
+      questions: [],
     });
 
     await api.updateRun(runId, { status: "exported", current_step: "export" });

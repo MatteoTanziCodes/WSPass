@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   ArchitectureChatStateSchema,
   DecompositionStateSchema,
+  DecompositionReviewStateSchema,
   ImplementationIssueStateCollectionSchema,
   PlannerRunInputSchema,
   RepoStateSchema,
@@ -63,6 +64,7 @@ export const RunDetailSchema = RunRecordSchema.extend({
   repo_state: RepoStateSchema.optional(),
   architecture_chat: ArchitectureChatStateSchema.optional(),
   decomposition_state: DecompositionStateSchema.optional(),
+  decomposition_review_state: DecompositionReviewStateSchema.optional(),
   implementation_state: ImplementationIssueStateCollectionSchema.optional(),
 }).strict();
 

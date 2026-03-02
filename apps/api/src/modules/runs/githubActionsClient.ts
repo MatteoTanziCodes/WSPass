@@ -4,6 +4,7 @@ type DispatchWorkflowInput = {
     | "phase1-architecture-refinement"
     | "phase2-repo-provision"
     | "phase2-decomposition"
+    | "phase2-decomposition-iterator"
     | "phase2-implementation";
   runId: string;
   apiBaseUrl: string;
@@ -81,6 +82,8 @@ export class GitHubActionsClient {
         ? process.env.GITHUB_REPO_PROVISION_WORKFLOW_FILE ?? "phase2-repo-provision.yml"
         : input.workflowName === "phase2-decomposition"
         ? process.env.GITHUB_DECOMPOSITION_WORKFLOW_FILE ?? "phase2-decomposition.yml"
+        : input.workflowName === "phase2-decomposition-iterator"
+        ? process.env.GITHUB_DECOMPOSITION_ITERATOR_WORKFLOW_FILE ?? "phase2-decomposition-iterator.yml"
         : input.workflowName === "phase2-implementation"
         ? process.env.GITHUB_IMPLEMENTATION_WORKFLOW_FILE ?? "phase2-implementation.yml"
         : process.env.GITHUB_PLANNER_WORKFLOW_FILE ?? "phase1-planner.yml";

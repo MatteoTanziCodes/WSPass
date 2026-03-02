@@ -62,6 +62,29 @@ export const OrgConstraintsSchema = z
 
 export type OrgConstraints = z.infer<typeof OrgConstraintsSchema>;
 
+export const DesignGuidelinesSchema = z
+  .object({
+    visual_direction: z.array(z.string().min(1)).default([]),
+    color_guidance: z.array(z.string().min(1)).default([]),
+    typography_guidance: z.array(z.string().min(1)).default([]),
+    interaction_guidance: z.array(z.string().min(1)).default([]),
+    accessibility_guidance: z.array(z.string().min(1)).default([]),
+    engineering_guidance: z.array(z.string().min(1)).default([]),
+    linting_guidance: z.array(z.string().min(1)).default([]),
+  })
+  .strict()
+  .default({
+    visual_direction: [],
+    color_guidance: [],
+    typography_guidance: [],
+    interaction_guidance: [],
+    accessibility_guidance: [],
+    engineering_guidance: [],
+    linting_guidance: [],
+  });
+
+export type DesignGuidelines = z.infer<typeof DesignGuidelinesSchema>;
+
 /* ---------------------------- Architecture Pack --------------------------- */
 
 export const ClarificationSchema = z
@@ -269,6 +292,7 @@ export const ArchitecturePackSchema = z
       .strict(),
 
     org_constraints: OrgConstraintsSchema,
+    design_guidelines: DesignGuidelinesSchema,
 
     clarifications: z.array(ClarificationSchema).default([]),
     actors: z.array(z.string().min(1)).default([]),

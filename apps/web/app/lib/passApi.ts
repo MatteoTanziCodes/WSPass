@@ -3,7 +3,11 @@ import {
   ArchitectureChatStateSchema,
   ArchitecturePackSchema,
   DecompositionPlanSchema,
+  DecompositionReviewArtifactSchema,
+  DecompositionReviewQuestionAnswerRequestSchema,
+  DecompositionReviewStateSchema,
   DecompositionStateSchema,
+  ImplementationIssueStateCollectionSchema,
   PlannerRunInputSchema,
   RepoStateSchema,
   RunExecutionSchema,
@@ -33,6 +37,7 @@ const RunListItemSchema = z.object({
   execution: RunExecutionSchema.optional(),
   repo_state: RepoStateSchema.optional(),
   decomposition_state: DecompositionStateSchema.optional(),
+  decomposition_review_state: DecompositionReviewStateSchema.optional(),
 });
 
 const RunListSchema = z.object({
@@ -49,29 +54,11 @@ const RunResourceSchema = z.object({
   step_timestamps: z.record(z.string(), z.string().datetime()),
   input: PlannerRunInputSchema.optional(),
   execution: RunExecutionSchema.optional(),
-  repo_state: z
-    .object({
-      repository: z.string(),
-      html_url: z.string().url(),
-      visibility: z.enum(["private", "public"]).optional(),
-    })
-    .optional(),
+  repo_state: RepoStateSchema.optional(),
   architecture_chat: ArchitectureChatStateSchema.optional(),
   decomposition_state: DecompositionStateSchema.optional(),
-  implementation_state: z
-    .object({
-      synced_at: z.string().datetime(),
-      issues: z.array(
-        z.object({
-          plan_item_id: z.string(),
-          title: z.string(),
-          issue_number: z.number().int().positive().optional(),
-          issue_url: z.string().url().optional(),
-          sync_status: z.string(),
-        })
-      ),
-    })
-    .optional(),
+  decomposition_review_state: DecompositionReviewStateSchema.optional(),
+  implementation_state: ImplementationIssueStateCollectionSchema.optional(),
 });
 
 const RunDetailSchema = z.object({
@@ -162,6 +149,18 @@ export async function getDecompositionPlan(runId: string) {
   return DecompositionPlanSchema.parse(artifact.payload);
 }
 
+export async function getDecompositionReview(runId: string) {
+  const response = await fetch(`${getBaseUrl()}/runs/${runId}/artifacts/decomposition_review`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    return null;
+  }
+
+  const artifact = ArtifactResponseSchema.parse(await response.json());
+  return DecompositionReviewArtifactSchema.parse(artifact.payload);
+}
+
 export async function createRun(
   input: z.infer<typeof PlannerRunInputSchema>
 ): Promise<z.infer<typeof RunResourceSchema>> {
@@ -189,6 +188,7 @@ export async function dispatchWorkflow(
     | "phase1-architecture-refinement"
     | "phase2-repo-provision"
     | "phase2-decomposition"
+    | "phase2-decomposition-iterator"
     | "phase2-implementation"
 ) {
   const response = await fetch(`${getBaseUrl()}/runs/${runId}/dispatch/${workflowName}`, {
@@ -202,6 +202,36 @@ export async function dispatchWorkflow(
       `Failed to dispatch ${workflowName}: ${response.status} ${text}`,
       response.status,
       text
+    );
+  }
+}
+
+export async function deleteRun(runId: string) {
+  const response = await fetch(`${getBaseUrl()}/runs/${runId}`, {
+    method: "DELETE",
+    headers: getAuthHeaders(),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to delete run ${runId}: ${response.status} ${text}`);
+  }
+}
+
+export async function answerDecompositionReviewQuestion(
+  runId: string,
+  payload: z.infer<typeof DecompositionReviewQuestionAnswerRequestSchema>
+) {
+  const response = await fetch(`${getBaseUrl()}/runs/${runId}/decomposition-review-questions`, {
+    method: "PATCH",
+    headers: getJsonAuthHeaders(),
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(
+      `Failed to answer decomposition review question: ${response.status} ${text}`
     );
   }
 }

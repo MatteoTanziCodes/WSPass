@@ -23,6 +23,8 @@ export const RUN_STATUSES = [
   "clarified",
   "plan_generated",
   "decomposition_generated",
+  "review_blocked",
+  "build_ready",
   "approved",
   "exported",
   "failed",
@@ -35,6 +37,7 @@ export const RUN_STEPS = [
   "clarify",
   "plan",
   "decompose",
+  "review",
   "approve",
   "export",
 ] as const;
@@ -57,5 +60,6 @@ export const WORKFLOW_NAMES = [
   "phase1-architecture-refinement",
   "phase2-repo-provision",
   "phase2-decomposition",
+  "phase2-decomposition-iterator",
   "phase2-implementation",
 ] as const;
