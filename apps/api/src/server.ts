@@ -1,14 +1,23 @@
 import { config as loadDotenv } from "dotenv";
 import { resolve } from "node:path";
 import Fastify from "fastify";
+import fastifyStatic from "@fastify/static";
 import { registerRunsRoutes } from "./modules/runs/runs.routes";
-import { registerIntegrationRoutes } from "./modules/integrations/integrations.routes"; // ADD
+import { registerIntegrationRoutes } from "./modules/integrations/integrations.routes"; 
+import { registerBrandAssetRoutes } from "./modules/brandAssets/brandAssets.routes";
 
 
 loadDotenv({ path: resolve(__dirname, "../../../.env") });
 
 async function start() {
   const app = Fastify({ logger: true });
+
+  // Needed for brand asset file downloads
+  await app.register(fastifyStatic, {
+    root: resolve(process.cwd(), "data/brand-assets/files"),
+    prefix: "/static/",
+    serve: false, // We serve manually via sendFile, not auto-routing
+  });
 
   app.get("/health", async () => ({ ok: true }));
 
