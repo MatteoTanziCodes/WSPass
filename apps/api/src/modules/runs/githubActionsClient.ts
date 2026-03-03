@@ -1,3 +1,5 @@
+import { retrieveSecret } from "../integrations/encryptedSecretStore";
+
 type DispatchWorkflowInput = {
   workflowName:
     | "phase1-planner"
@@ -5,9 +7,13 @@ type DispatchWorkflowInput = {
     | "phase2-repo-provision"
     | "phase2-decomposition"
     | "phase2-decomposition-iterator"
-    | "phase2-implementation";
+    | "phase2-implementation"
+    | "phase3-build-orchestrator"
+    | "phase3-issue-execution"
+    | "phase3-pr-supervisor";
   runId: string;
   apiBaseUrl: string;
+  issueId?: string;
 };
 
 export class GitHubActionsConfigError extends Error {
@@ -50,31 +56,37 @@ function resolveRepository() {
 }
 
 export class GitHubActionsClient {
-  private readonly token: string;
   private readonly workflowRef: string;
   private readonly owner: string;
   private readonly repo: string;
 
   constructor() {
-    this.token =
+    this.workflowRef = process.env.GITHUB_WORKFLOW_REF ?? "main";
+    const repository = resolveRepository();
+    this.owner = repository.owner;
+    this.repo = repository.repo;
+  }
+
+  private async getToken() {
+    const token =
+      (await retrieveSecret("github")) ??
       process.env.PASS_GITHUB_WORKFLOW_TOKEN ??
       process.env.GITHUB_WORKFLOW_TOKEN ??
       process.env.PASS_GITHUB_TOKEN ??
       process.env.GITHUB_TOKEN ??
       "";
-    this.workflowRef = process.env.GITHUB_WORKFLOW_REF ?? "main";
-    const repository = resolveRepository();
-    this.owner = repository.owner;
-    this.repo = repository.repo;
 
-    if (!this.token) {
+    if (!token) {
       throw new GitHubActionsConfigError(
-        "GitHub workflow dispatch requires PASS_GITHUB_WORKFLOW_TOKEN, GITHUB_WORKFLOW_TOKEN, PASS_GITHUB_TOKEN, or GITHUB_TOKEN."
+        "GitHub workflow dispatch requires a connected admin integration or PASS_GITHUB_WORKFLOW_TOKEN / GITHUB_TOKEN."
       );
     }
+
+    return token;
   }
 
   async dispatchWorkflow(input: DispatchWorkflowInput): Promise<void> {
+    const token = await this.getToken();
     const workflowFile =
       input.workflowName === "phase1-architecture-refinement"
         ? process.env.GITHUB_ARCHITECTURE_REFINEMENT_WORKFLOW_FILE ?? "phase1-architecture-refinement.yml"
@@ -86,6 +98,12 @@ export class GitHubActionsClient {
         ? process.env.GITHUB_DECOMPOSITION_ITERATOR_WORKFLOW_FILE ?? "phase2-decomposition-iterator.yml"
         : input.workflowName === "phase2-implementation"
         ? process.env.GITHUB_IMPLEMENTATION_WORKFLOW_FILE ?? "phase2-implementation.yml"
+        : input.workflowName === "phase3-build-orchestrator"
+        ? process.env.GITHUB_BUILD_ORCHESTRATOR_WORKFLOW_FILE ?? "phase3-build-orchestrator.yml"
+        : input.workflowName === "phase3-issue-execution"
+        ? process.env.GITHUB_ISSUE_EXECUTION_WORKFLOW_FILE ?? "phase3-issue-execution.yml"
+        : input.workflowName === "phase3-pr-supervisor"
+        ? process.env.GITHUB_PR_SUPERVISOR_WORKFLOW_FILE ?? "phase3-pr-supervisor.yml"
         : process.env.GITHUB_PLANNER_WORKFLOW_FILE ?? "phase1-planner.yml";
     const url = `https://api.github.com/repos/${this.owner}/${this.repo}/actions/workflows/${workflowFile}/dispatches`;
 
@@ -93,7 +111,7 @@ export class GitHubActionsClient {
       method: "POST",
       headers: {
         Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${this.token}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         "X-GitHub-Api-Version": "2022-11-28",
       },
@@ -102,6 +120,7 @@ export class GitHubActionsClient {
         inputs: {
           run_id: input.runId,
           api_base_url: input.apiBaseUrl,
+          ...(input.issueId ? { issue_id: input.issueId } : {}),
         },
       }),
     });

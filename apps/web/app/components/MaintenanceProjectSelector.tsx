@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import { deleteProjectAction, dispatchWorkflowAction } from "../actions";
+import { FormSubmitButton } from "./FormSubmitButton";
 import { StatusBadge } from "./StatusBadge";
 
 type MaintenanceBucket = "green" | "yellow" | "red";
@@ -64,26 +65,26 @@ function bucketMeta(bucket: MaintenanceBucket) {
   if (bucket === "green") {
     return {
       label: "Completed",
-      color: "#35db95",
-      background: "rgba(53, 219, 149, 0.12)",
-      text: "#b7ffd7",
+      color: "var(--success)",
+      background: "var(--success-soft)",
+      text: "var(--success-ink)",
     };
   }
 
   if (bucket === "red") {
     return {
       label: "Blocked / Failed",
-      color: "#ff7676",
-      background: "rgba(255, 118, 118, 0.12)",
-      text: "#ffc5c5",
+      color: "var(--danger)",
+      background: "var(--danger-soft)",
+      text: "var(--danger-ink)",
     };
   }
 
   return {
     label: "Pending / In Progress",
-    color: "#ffb347",
-    background: "rgba(255, 179, 71, 0.12)",
-    text: "#ffe3bb",
+    color: "var(--warning)",
+    background: "var(--warning-soft)",
+    text: "var(--warning-ink)",
   };
 }
 
@@ -169,10 +170,16 @@ function DonutChart(props: {
 
       <div className="flex justify-center xl:justify-end">
         <svg viewBox="0 0 260 260" className="h-[280px] w-[280px] overflow-visible">
-          <circle cx="130" cy="130" r="95" fill="transparent" stroke="rgba(255,255,255,0.08)" strokeWidth="34" />
+          <circle
+            cx="130"
+            cy="130"
+            r="95"
+            fill="transparent"
+            stroke="var(--line-strong)"
+            strokeOpacity="0.35"
+            strokeWidth="34"
+          />
           {slices.map((slice) => {
-            const midAngle = slice.startAngle + (slice.endAngle - slice.startAngle) / 2;
-            const textPoint = polarToCartesian(130, 130, 78, midAngle);
             const active = selected === "all" || selected === slice.bucket;
 
             if (slice.value <= 0) {
@@ -186,42 +193,17 @@ function DonutChart(props: {
                   fill={slice.meta.color}
                   opacity={active ? 1 : 0.35}
                 />
-                <text
-                  x={textPoint.x}
-                  y={textPoint.y}
-                  fill="white"
-                  fontSize="14"
-                  fontFamily="var(--font-ibm-plex-mono)"
-                  textAnchor="middle"
-                  dominantBaseline="middle"
-                >
-                  {percentage(slice.value, total)}
-                </text>
               </g>
             );
           })}
-          <circle cx="130" cy="130" r="58" fill="rgba(0,0,0,0.55)" />
-          <text
-            x="130"
-            y="120"
-            fill="white"
-            fontSize="14"
-            fontFamily="var(--font-ibm-plex-mono)"
-            textAnchor="middle"
-          >
-            Projects
-          </text>
-          <text
-            x="130"
-            y="146"
-            fill="white"
-            fontSize="28"
-            fontFamily="var(--font-space-grotesk)"
-            fontWeight="700"
-            textAnchor="middle"
-          >
-            {total}
-          </text>
+          <circle
+            cx="130"
+            cy="130"
+            r="58"
+            fill="var(--panel-strong)"
+            stroke="var(--line-strong)"
+            strokeWidth="1"
+          />
         </svg>
       </div>
     </div>
@@ -351,7 +333,9 @@ export function MaintenanceProjectSelector(props: { projects: MaintenanceProject
             </Link>
             <div className="font-mono text-sm text-[color:var(--ink)]">{project.runsCount}</div>
             <div className="flex items-center justify-start">
-              <StatusBadge label={project.latestStatusLabel} tone={project.latestStatusTone} />
+              <div className="min-w-0">
+                <StatusBadge label={project.latestStatusLabel} tone={project.latestStatusTone} />
+              </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {project.rerunnable && project.rerunWorkflowName ? (
@@ -359,23 +343,21 @@ export function MaintenanceProjectSelector(props: { projects: MaintenanceProject
                   <input type="hidden" name="run_id" value={project.latestRunId} />
                   <input type="hidden" name="workflow_name" value={project.rerunWorkflowName} />
                   <input type="hidden" name="return_to" value="/maintenance" />
-                  <button
-                    type="submit"
-                    className="border border-[color:var(--accent)] px-3 py-2 font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--accent)] transition hover:bg-[color:var(--accent)] hover:text-white"
-                  >
-                    Re-run
-                  </button>
+                  <FormSubmitButton
+                    idleLabel="Re-run"
+                    pendingLabel="Re-running..."
+                    className="border border-[color:var(--accent)] px-3 py-2 font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--accent)] transition hover:bg-[color:var(--accent)] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  />
                 </form>
               ) : null}
               <form action={deleteProjectAction}>
                 <input type="hidden" name="return_to" value="/maintenance" />
                 <input type="hidden" name="run_ids" value={project.runIds.join(",")} />
-                <button
-                  type="submit"
-                  className="border border-[#aa3d3d] px-3 py-2 font-mono text-[11px] uppercase tracking-[0.18em] text-[#ff7d7d] transition hover:bg-[#aa3d3d]/10"
-                >
-                  Delete
-                </button>
+                <FormSubmitButton
+                  idleLabel="Delete"
+                  pendingLabel="Deleting..."
+                  className="border border-[color:var(--danger)] px-3 py-2 font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--danger-ink)] transition hover:bg-[color:var(--danger-soft)] disabled:cursor-not-allowed disabled:opacity-50"
+                />
               </form>
             </div>
           </div>

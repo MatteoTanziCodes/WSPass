@@ -3,10 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "npm run build -w @pass/shared",
     "dev": "next dev",
+    "prebuild": "npm run build -w @pass/shared",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "pretypecheck": "npm run build -w @pass/shared",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

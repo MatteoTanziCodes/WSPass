@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createRunAction } from "../actions";
+import { FormSubmitButton } from "./FormSubmitButton";
 import type { GitHubRepository } from "../lib/github";
 
 function repoShortName(fullName: string) {
@@ -247,12 +248,11 @@ export function ProjectIntakeForm(props: { repositories: GitHubRepository[] }) {
         ) : null}
       </div>
 
-      <button
-        type="submit"
-        className="w-full border border-[color:var(--accent)] bg-[color:var(--accent)] px-4 py-3 font-mono text-sm uppercase tracking-[0.18em] text-white transition hover:bg-transparent hover:text-[color:var(--accent)]"
-      >
-        Create Project
-      </button>
+      <FormSubmitButton
+        idleLabel="Create Project"
+        pendingLabel="Creating project..."
+        className="w-full border border-[color:var(--accent)] bg-[color:var(--accent)] px-4 py-3 font-mono text-sm uppercase tracking-[0.18em] text-white transition hover:bg-transparent hover:text-[color:var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
+      />
     </form>
   );
 }

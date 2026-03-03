@@ -21,6 +21,7 @@ export function AppShell(props: { children: React.ReactNode }) {
   const homeActive = pathname === "/projects" || pathname === "/" || pathname === "/projects/new";
   const maintenanceActive =
     pathname === "/maintenance" || pathname.startsWith("/projects/") && pathname.endsWith("/maintenance");
+  const observeActive = pathname === "/observe";
   const adminActive = pathname === "/admin";
 
   return (
@@ -32,6 +33,9 @@ export function AppShell(props: { children: React.ReactNode }) {
           </Link>
           <Link href="/maintenance" className={navItemClass(maintenanceActive)}>
             Maintenance
+          </Link>
+          <Link href="/observe" className={navItemClass(observeActive)}>
+            Observe
           </Link>
           <Link href="/admin" className={navItemClass(adminActive)}>
             Admin

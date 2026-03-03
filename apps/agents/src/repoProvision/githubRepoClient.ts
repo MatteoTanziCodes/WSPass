@@ -1,3 +1,5 @@
+import { resolveIntegrationToken } from "../lib/integrationTokens";
+
 type GitHubRepositoryResponse = {
   name: string;
   full_name: string;
@@ -23,22 +25,6 @@ type UpdateRepositoryInput = {
   visibility?: "private" | "public";
 };
 
-function readGitHubToken() {
-  const token =
-    process.env.PASS_GITHUB_WORKFLOW_TOKEN ??
-    process.env.GITHUB_WORKFLOW_TOKEN ??
-    process.env.PASS_GITHUB_TOKEN ??
-    process.env.GITHUB_TOKEN;
-
-  if (!token) {
-    throw new Error(
-      "GitHub repo provisioning requires PASS_GITHUB_WORKFLOW_TOKEN, GITHUB_WORKFLOW_TOKEN, PASS_GITHUB_TOKEN, or GITHUB_TOKEN."
-    );
-  }
-
-  return token;
-}
-
 function splitRepository(repository: string) {
   const [owner, repo] = repository.split("/", 2);
   if (!owner || !repo) {
@@ -48,10 +34,10 @@ function splitRepository(repository: string) {
 }
 
 export class GitHubRepoClient {
-  private readonly token: string;
+  private readonly explicitToken: string | null;
 
-  constructor() {
-    this.token = readGitHubToken();
+  constructor(token?: string) {
+    this.explicitToken = token?.trim() || null;
   }
 
   async getRepository(owner: string, repo: string) {
@@ -95,12 +81,29 @@ export class GitHubRepoClient {
     return viewer.login;
   }
 
+  private async getToken() {
+    return (
+      this.explicitToken ??
+      (await resolveIntegrationToken(
+        "github",
+        [
+          "PASS_GITHUB_WORKFLOW_TOKEN",
+          "GITHUB_WORKFLOW_TOKEN",
+          "PASS_GITHUB_TOKEN",
+          "GITHUB_TOKEN",
+        ],
+        "GitHub repo provisioning requires a connected admin integration or PASS_GITHUB_WORKFLOW_TOKEN / GITHUB_TOKEN."
+      ))
+    );
+  }
+
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const token = await this.getToken();
     const response = await fetch(`https://api.github.com${path}`, {
       method,
       headers: {
         Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${this.token}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         "X-GitHub-Api-Version": "2022-11-28",
       },

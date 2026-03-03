@@ -1,13 +1,22 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import type {
+  DecompositionClarifyingQuestion,
+  DecompositionGap,
+} from "@pass/shared";
 import {
   answerDecompositionReviewQuestionAction,
   dispatchWorkflowAction,
   runBuildReadinessAction,
 } from "../../../actions";
 import { ConsoleChrome } from "../../../components/ConsoleChrome";
+import { FormSubmitButton } from "../../../components/FormSubmitButton";
+import {
+  IteratorGapCard,
+} from "../../../components/IteratorReviewDetails";
 import { StatusBadge } from "../../../components/StatusBadge";
 import {
+  describeArchitectureBlock,
   deriveDecompositionReviewTone,
   deriveDecompositionStatusTone,
   formatDate,
@@ -19,6 +28,108 @@ function buttonClass(primary = false) {
   return primary
     ? "border border-[color:var(--accent)] bg-[color:var(--accent)] px-4 py-3 font-mono text-xs uppercase tracking-[0.18em] text-white transition hover:bg-transparent hover:text-[color:var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
     : "border border-[color:var(--line-strong)] px-4 py-3 font-mono text-xs uppercase tracking-[0.18em] text-[color:var(--ink-strong)] transition hover:border-[color:var(--accent)] hover:text-[color:var(--accent)] disabled:cursor-not-allowed disabled:opacity-40";
+}
+
+type ActionableReviewItem =
+  | {
+      kind: "gap";
+      key: string;
+      gap: DecompositionGap;
+      question?: DecompositionClarifyingQuestion;
+    }
+  | {
+      kind: "question";
+      key: string;
+      question: DecompositionClarifyingQuestion;
+    };
+
+function buildActionableReviewItems(
+  gaps: DecompositionGap[],
+  questions: DecompositionClarifyingQuestion[]
+) {
+  const openQuestions = questions.filter((question) => question.status === "open");
+  const answeredGapIds = new Set(
+    questions
+      .filter((question) => question.status !== "open")
+      .flatMap((question) => question.derived_from_gap_ids)
+  );
+  const matchedQuestionIds = new Set<string>();
+  const items: ActionableReviewItem[] = [];
+
+  for (const gap of gaps) {
+    if (answeredGapIds.has(gap.id)) {
+      continue;
+    }
+
+    const question = openQuestions.find((candidate) =>
+      candidate.derived_from_gap_ids.includes(gap.id)
+    );
+
+    if (question) {
+      matchedQuestionIds.add(question.id);
+    }
+
+    items.push({
+      kind: "gap",
+      key: `gap:${gap.id}`,
+      gap,
+      question,
+    });
+  }
+
+  for (const question of openQuestions) {
+    if (matchedQuestionIds.has(question.id)) {
+      continue;
+    }
+
+    items.push({
+      kind: "question",
+      key: `question:${question.id}`,
+      question,
+    });
+  }
+
+  return items;
+}
+
+function ReviewAnswerForm(props: {
+  runId: string;
+  returnTo: string;
+  canAnswer: boolean;
+  prompt: string;
+  questionId?: string;
+  gapId?: string;
+}) {
+  const { runId, returnTo, canAnswer, prompt, questionId, gapId } = props;
+
+  return (
+    <form
+      action={answerDecompositionReviewQuestionAction}
+      className="mt-4 border border-[color:var(--line)] bg-[color:var(--panel-soft)] p-4"
+    >
+      <input type="hidden" name="run_id" value={runId} />
+      <input type="hidden" name="return_to" value={returnTo} />
+      {questionId ? <input type="hidden" name="question_id" value={questionId} /> : null}
+      {gapId ? <input type="hidden" name="gap_id" value={gapId} /> : null}
+      <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--warning)]">
+        Respond to this blocker
+      </p>
+      <p className="mt-2 text-sm leading-7 text-[color:var(--ink)]">{prompt}</p>
+      <textarea
+        name="answer"
+        rows={4}
+        disabled={!canAnswer}
+        className="mt-4 w-full border border-[color:var(--line)] bg-[color:var(--panel)] px-4 py-3 text-sm leading-7 outline-none transition focus:border-[color:var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
+        placeholder="Answer here."
+      />
+      <FormSubmitButton
+        idleLabel="Submit answer"
+        pendingLabel="Submitting answer..."
+        disabled={!canAnswer}
+        className="mt-4 border border-[color:var(--accent)] bg-[color:var(--accent)] px-4 py-3 font-mono text-xs uppercase tracking-[0.18em] text-white transition hover:bg-transparent hover:text-[color:var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
+      />
+    </form>
+  );
 }
 
 export default async function DecomposePage(props: {
@@ -35,6 +146,10 @@ export default async function DecomposePage(props: {
   const returnTo = `/projects/${runId}/decompose`;
   const repoTarget = run.run.repo_state ?? run.run.input?.repo_target;
   const reviewStatus = run.run.decomposition_review_state?.status ?? "not_started";
+  const hasCurrentReviewState =
+    reviewStatus !== "not_started" ||
+    Boolean(run.run.decomposition_review_state?.last_reviewed_at);
+  const reviewBlocked = reviewStatus === "blocked";
   const decompositionRunning =
     run.run.execution?.workflow_name === "phase2-decomposition" &&
     ["queued", "dispatched", "running"].includes(run.run.execution.status);
@@ -44,16 +159,33 @@ export default async function DecomposePage(props: {
   const repoProvisionRunning =
     run.run.execution?.workflow_name === "phase2-repo-provision" &&
     ["queued", "dispatched", "running"].includes(run.run.execution.status);
-  const openQuestions =
-    run.run.decomposition_review_state?.questions.filter((question) => question.status === "open") ?? [];
-  const remainingGaps = decompositionReview?.gaps ?? [];
+  const reviewQuestions = hasCurrentReviewState
+    ? run.run.decomposition_review_state?.questions ?? []
+    : [];
+  const remainingGaps = reviewBlocked ? decompositionReview?.gaps ?? [] : [];
+  const actionableReviewItems = reviewBlocked
+    ? buildActionableReviewItems(remainingGaps, reviewQuestions)
+    : [];
+  const conversationMessages =
+    run.run.architecture_chat?.messages.filter((message) => message.role !== "system") ?? [];
   const hasDecompositionDraft = Boolean(decompositionPlan);
   const primaryActionLabel = hasDecompositionDraft ? "Build" : "Decompose project";
+  const iteratorProgressMessage =
+    iteratorRunning && reviewStatus === "iterating"
+      ? run.run.decomposition_review_state?.blocked_reason?.trim() || "Claude iterator review is in progress."
+      : null;
   const reviewSummary =
-    decompositionReview?.summary ??
+    iteratorProgressMessage ??
+    (hasCurrentReviewState
+      ? decompositionReview?.blocking_summary ?? decompositionReview?.summary
+      : null) ??
     (run.run.execution?.status === "failed"
       ? `No iterator review summary yet because the latest workflow failed: ${run.run.execution.error_message ?? "unknown error"}`
       : "No iterator review summary yet.");
+  const architectureBlock = describeArchitectureBlock(
+    gates.unresolvedClarifications,
+    gates.unresolvedOpenQuestions
+  );
 
   return (
     <ConsoleChrome run={run.run} projectLabel={projectLabel}>
@@ -74,10 +206,11 @@ export default async function DecomposePage(props: {
             {gates.architectureBlocked ? (
               <div className="mt-6 border border-[color:var(--warning)] bg-[color:var(--panel-soft)] p-4">
                 <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--warning)]">
-                  Blocked by architecture clarifications
+                  {architectureBlock?.title ?? "Blocked by architecture clarifications"}
                 </p>
                 <p className="mt-3 text-sm leading-7 text-[color:var(--ink)]">
-                  This stage is locked until the architecture step has no unanswered clarifications or open questions.
+                  {architectureBlock?.detail ??
+                    "This stage is locked until the architecture step has no unanswered clarifications or open questions."}
                 </p>
               </div>
             ) : null}
@@ -165,9 +298,9 @@ export default async function DecomposePage(props: {
                     : gates.architectureBlocked
                       ? "Return to architecture, answer the pending questions, and rerun refinement before decomposition."
                     : iteratorRunning
-                      ? "The iterator is reviewing coverage, auto-amending obvious gaps, and checking whether the project is build-ready."
-                    : decompositionRunning
-                      ? "The agent is reading the current architecture pack and producing work items now."
+                      ? "Claude is reviewing coverage, auto-amending obvious gaps, and checking whether the project is build-ready."
+                      : decompositionRunning
+                        ? "The agent is reading the current architecture pack and producing work items now."
                       : repoProvisionRunning
                         ? "Repo resolution is still running, so decomposition cannot produce a plan yet."
                         : run.run.execution?.status === "failed"
@@ -194,13 +327,12 @@ export default async function DecomposePage(props: {
                   <input type="hidden" name="run_id" value={runId} />
                   <input type="hidden" name="workflow_name" value="phase2-repo-provision" />
                   <input type="hidden" name="return_to" value={returnTo} />
-                  <button
-                    type="submit"
+                  <FormSubmitButton
+                    idleLabel="Resolve target repo"
+                    pendingLabel="Resolving repo..."
                     disabled={!gates.canResolveRepo}
                     className={buttonClass(true)}
-                  >
-                    Resolve target repo
-                  </button>
+                  />
                 </form>
               ) : isReviewReadyStatus(reviewStatus) ? (
                 <>
@@ -211,13 +343,12 @@ export default async function DecomposePage(props: {
                     <form action={runBuildReadinessAction}>
                       <input type="hidden" name="run_id" value={runId} />
                       <input type="hidden" name="return_to" value={returnTo} />
-                      <button
-                        type="submit"
+                      <FormSubmitButton
+                        idleLabel="Re-run build readiness"
+                        pendingLabel="Re-running build readiness..."
                         disabled={!gates.canBuildReview}
                         className={buttonClass(false)}
-                      >
-                        Re-run build readiness
-                      </button>
+                      />
                     </form>
                   ) : null}
                 </>
@@ -225,14 +356,54 @@ export default async function DecomposePage(props: {
                 <form action={runBuildReadinessAction}>
                   <input type="hidden" name="run_id" value={runId} />
                   <input type="hidden" name="return_to" value={returnTo} />
-                  <button
-                    type="submit"
+                  <FormSubmitButton
+                    idleLabel={primaryActionLabel}
+                    pendingLabel={
+                      primaryActionLabel === "Build"
+                        ? "Running build readiness..."
+                        : "Generating decomposition..."
+                    }
                     disabled={!gates.canBuildReview}
                     className={buttonClass(true)}
-                  >
-                    {primaryActionLabel}
-                  </button>
+                  />
                 </form>
+              )}
+            </div>
+          </section>
+
+          <section className="border border-[color:var(--line)] bg-[color:var(--panel)] p-6">
+            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--accent)]">
+              Refinement conversation
+            </p>
+            <p className="mt-4 max-w-[72ch] font-mono text-sm leading-7 text-[color:var(--muted)]">
+              This is the conversation history Claude is using as it refines architecture and reruns decomposition.
+            </p>
+            <div className="mt-5 max-h-[520px] space-y-3 overflow-auto border border-[color:var(--line)] bg-[color:var(--panel-soft)] p-4">
+              {conversationMessages.length > 0 ? (
+                conversationMessages.map((message) => (
+                  <div
+                    key={message.id}
+                    className={`border px-4 py-4 ${
+                      message.role === "assistant"
+                        ? "border-[#2a8b56] bg-[rgba(42,139,86,0.08)] text-[color:var(--ink-strong)]"
+                        : "border-[color:var(--accent)] bg-[rgba(230,126,34,0.08)] text-[color:var(--ink-strong)]"
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)]">
+                        {message.role === "assistant" ? "Claude" : "You"}
+                      </p>
+                      <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)]">
+                        {formatDate(message.created_at)}
+                      </p>
+                    </div>
+                    <p className="mt-3 whitespace-pre-wrap text-sm leading-7">{message.content}</p>
+                  </div>
+                ))
+              ) : (
+                <p className="font-mono text-sm uppercase tracking-[0.16em] text-[color:var(--muted)]">
+                  No conversation history yet.
+                </p>
               )}
             </div>
           </section>
@@ -271,9 +442,26 @@ export default async function DecomposePage(props: {
               <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)]">
                 Latest iterator summary
               </p>
+              {iteratorProgressMessage ? (
+                <p className="mt-3 font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--warning)]">
+                  Live iterator progress
+                </p>
+              ) : null}
               <p className="mt-3 whitespace-pre-wrap text-sm leading-7 text-[color:var(--ink)]">
                 {reviewSummary}
               </p>
+              {decompositionReview?.claude_review_notes.length ? (
+                <div className="mt-4">
+                  <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)]">
+                    Claude review notes
+                  </p>
+                  <ul className="mt-2 space-y-2 text-sm leading-7 text-[color:var(--ink)]">
+                    {decompositionReview.claude_review_notes.map((item) => (
+                      <li key={item}>- {item}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
               {decompositionReview?.amendments_applied.length ? (
                 <ul className="mt-4 space-y-2 text-sm leading-6 text-[color:var(--ink)]">
                   {decompositionReview.amendments_applied.map((item) => (
@@ -283,186 +471,61 @@ export default async function DecomposePage(props: {
               ) : null}
             </div>
 
-            {remainingGaps.length > 0 ? (
+            {actionableReviewItems.length > 0 ? (
               <div className="mt-5 border border-[color:var(--danger)] bg-[color:var(--panel-soft)] p-4">
                 <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--danger)]">
-                  Remaining gaps
+                  Action required
+                </p>
+                <p className="mt-3 text-sm leading-7 text-[color:var(--ink)]">
+                  Claude cannot finish the decomposition because it still needs the information listed below.
+                  Respond directly to each blocker here. Answered blockers are removed from this queue
+                  while the rerun is in progress.
                 </p>
                 <div className="mt-4 space-y-4">
-                  {remainingGaps.map((gap) => (
-                    <div
-                      key={gap.id}
-                      className="border border-[color:var(--line)] bg-[color:var(--panel)] p-4"
-                    >
-                      <div className="flex flex-wrap items-center gap-3">
-                        <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--danger)]">
-                          {gap.id}
-                        </p>
-                        <StatusBadge label={gap.severity} tone={gap.severity === "high" ? "danger" : gap.severity === "medium" ? "accent" : "default"} />
-                        <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)]">
-                          {gap.type.replaceAll("_", " ")}
-                        </span>
-                      </div>
-                      <p className="mt-3 text-sm leading-7 text-[color:var(--ink-strong)]">
-                        {gap.summary}
-                      </p>
-                      {gap.resolution_notes ? (
-                        <p className="mt-2 text-sm leading-7 text-[color:var(--ink)]">
-                          {gap.resolution_notes}
-                        </p>
-                      ) : null}
-                      <div className="mt-4 grid gap-4 md:grid-cols-2">
-                        <div>
-                          <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)]">
-                            Affected requirements
+                  {actionableReviewItems.map((item) => (
+                    <div key={item.key} className="space-y-4">
+                      {item.kind === "gap" ? (
+                        <>
+                          <IteratorGapCard gap={item.gap} />
+                          <ReviewAnswerForm
+                            runId={runId}
+                            returnTo={returnTo}
+                            canAnswer={gates.canAnswerReviewQuestions}
+                            questionId={item.question?.id}
+                            gapId={item.gap.id}
+                            prompt={
+                              item.question?.prompt ??
+                              item.gap.why_blocked ??
+                              item.gap.summary
+                            }
+                          />
+                        </>
+                      ) : (
+                        <div className="border border-[color:var(--line)] bg-[color:var(--panel)] p-4">
+                          <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--warning)]">
+                            {item.question.id}
                           </p>
-                          <p className="mt-2 break-words font-mono text-xs uppercase tracking-[0.14em] text-[color:var(--ink)]">
-                            {gap.affected_requirement_ids.length > 0
-                              ? gap.affected_requirement_ids.join(", ")
-                              : "none"}
+                          <p className="mt-3 text-base font-semibold text-[color:var(--ink-strong)]">
+                            {item.question.prompt}
                           </p>
+                          <p className="mt-3 text-sm leading-7 text-[color:var(--ink)]">
+                            {item.question.rationale}
+                          </p>
+                          <ReviewAnswerForm
+                            runId={runId}
+                            returnTo={returnTo}
+                            canAnswer={gates.canAnswerReviewQuestions}
+                            questionId={item.question.id}
+                            prompt={item.question.prompt}
+                          />
                         </div>
-                        <div>
-                          <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)]">
-                            Affected components
-                          </p>
-                          <p className="mt-2 break-words font-mono text-xs uppercase tracking-[0.14em] text-[color:var(--ink)]">
-                            {gap.affected_components.length > 0
-                              ? gap.affected_components.join(", ")
-                              : "none"}
-                          </p>
-                        </div>
-                      </div>
+                      )}
                     </div>
                   ))}
                 </div>
               </div>
             ) : null}
           </section>
-
-          {openQuestions.length > 0 ? (
-            <section className="border border-[color:var(--warning)] bg-[color:var(--panel)] p-6">
-              <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--warning)]">
-                Clarifying Questions
-              </p>
-              <p className="mt-4 max-w-[72ch] font-mono text-sm leading-7 text-[color:var(--muted)]">
-                Iterator review is blocked. Answer these questions and the system will rerun refinement,
-                decomposition, and coverage review automatically.
-              </p>
-              <div className="mt-5 space-y-5">
-                {openQuestions.map((question) => (
-                  <form
-                    key={question.id}
-                    action={answerDecompositionReviewQuestionAction}
-                    className="border border-[color:var(--line)] bg-[color:var(--panel-soft)] p-4"
-                  >
-                    <input type="hidden" name="run_id" value={runId} />
-                    <input type="hidden" name="question_id" value={question.id} />
-                    <input type="hidden" name="return_to" value={returnTo} />
-                    <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--warning)]">
-                      {question.id}
-                    </p>
-                    <p className="mt-3 text-base font-semibold text-[color:var(--ink-strong)]">
-                      {question.prompt}
-                    </p>
-                    <p className="mt-2 text-sm leading-7 text-[color:var(--ink)]">
-                      {question.rationale}
-                    </p>
-                    <textarea
-                      name="answer"
-                      rows={4}
-                      disabled={!gates.canAnswerReviewQuestions}
-                      className="mt-4 w-full border border-[color:var(--line)] bg-[color:var(--panel)] px-4 py-3 text-sm leading-7 outline-none transition focus:border-[color:var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
-                      placeholder="Answer the clarifying question here."
-                    />
-                    <div className="mt-4 grid gap-4 md:grid-cols-3">
-                      <div>
-                        <label className="block font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)]">
-                          PRD update
-                        </label>
-                        <textarea
-                          name="iterator_prd_text"
-                          rows={3}
-                          disabled={!gates.canAnswerReviewQuestions}
-                          className="mt-2 w-full border border-[color:var(--line)] bg-[color:var(--panel)] px-4 py-3 text-sm leading-7 outline-none transition focus:border-[color:var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
-                          placeholder="Optional PRD update."
-                        />
-                      </div>
-                      <div>
-                        <label className="block font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)]">
-                          Org constraints update
-                        </label>
-                        <textarea
-                          name="iterator_org_constraints_text"
-                          rows={3}
-                          disabled={!gates.canAnswerReviewQuestions}
-                          className="mt-2 w-full border border-[color:var(--line)] bg-[color:var(--panel)] px-4 py-3 text-sm leading-7 outline-none transition focus:border-[color:var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
-                          placeholder="Optional org constraints update."
-                        />
-                      </div>
-                      <div>
-                        <label className="block font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)]">
-                          Design guidelines update
-                        </label>
-                        <textarea
-                          name="iterator_design_guidelines_text"
-                          rows={3}
-                          disabled={!gates.canAnswerReviewQuestions}
-                          className="mt-2 w-full border border-[color:var(--line)] bg-[color:var(--panel)] px-4 py-3 text-sm leading-7 outline-none transition focus:border-[color:var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
-                          placeholder="Optional design guidance update."
-                        />
-                      </div>
-                    </div>
-                    <div className="mt-4 grid gap-4 md:grid-cols-3">
-                      <label className="block border border-[color:var(--line)] bg-[color:var(--panel)] p-4">
-                        <span className="block font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)]">
-                          PRD file
-                        </span>
-                        <input
-                          name="iterator_prd_file"
-                          type="file"
-                          disabled={!gates.canAnswerReviewQuestions}
-                          accept=".txt,.md,.markdown,.rtf,.docx"
-                          className="mt-3 block w-full text-sm file:mr-3 file:border file:border-[color:var(--line)] file:bg-transparent file:px-3 file:py-1 file:font-mono file:text-[11px] file:uppercase file:tracking-[0.14em] disabled:cursor-not-allowed disabled:opacity-50"
-                        />
-                      </label>
-                      <label className="block border border-[color:var(--line)] bg-[color:var(--panel)] p-4">
-                        <span className="block font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)]">
-                          Org constraints file
-                        </span>
-                        <input
-                          name="iterator_org_constraints_file"
-                          type="file"
-                          disabled={!gates.canAnswerReviewQuestions}
-                          accept=".txt,.md,.markdown,.rtf,.docx"
-                          className="mt-3 block w-full text-sm file:mr-3 file:border file:border-[color:var(--line)] file:bg-transparent file:px-3 file:py-1 file:font-mono file:text-[11px] file:uppercase file:tracking-[0.14em] disabled:cursor-not-allowed disabled:opacity-50"
-                        />
-                      </label>
-                      <label className="block border border-[color:var(--line)] bg-[color:var(--panel)] p-4">
-                        <span className="block font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)]">
-                          Design guidelines file
-                        </span>
-                        <input
-                          name="iterator_design_guidelines_file"
-                          type="file"
-                          disabled={!gates.canAnswerReviewQuestions}
-                          accept=".txt,.md,.markdown,.rtf,.docx"
-                          className="mt-3 block w-full text-sm file:mr-3 file:border file:border-[color:var(--line)] file:bg-transparent file:px-3 file:py-1 file:font-mono file:text-[11px] file:uppercase file:tracking-[0.14em] disabled:cursor-not-allowed disabled:opacity-50"
-                        />
-                      </label>
-                    </div>
-                    <button
-                      type="submit"
-                      disabled={!gates.canAnswerReviewQuestions}
-                      className="mt-4 border border-[color:var(--accent)] bg-[color:var(--accent)] px-4 py-3 font-mono text-xs uppercase tracking-[0.18em] text-white transition hover:bg-transparent hover:text-[color:var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      Submit answer
-                    </button>
-                  </form>
-                ))}
-              </div>
-            </section>
-          ) : null}
 
           <section className="border border-[color:var(--line)] bg-[color:var(--panel)] p-6">
             <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--accent)]">

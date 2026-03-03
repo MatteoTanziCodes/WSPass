@@ -3,8 +3,13 @@ import { notFound } from "next/navigation";
 import { sendArchitectureFeedbackAction } from "../../../actions";
 import { ArchitectureDiagram } from "../../../components/ArchitectureDiagram";
 import { ConsoleChrome } from "../../../components/ConsoleChrome";
+import { FormSubmitButton } from "../../../components/FormSubmitButton";
 import { StatusBadge } from "../../../components/StatusBadge";
-import { formatDate, getRunConsoleData } from "../../../lib/consoleData";
+import {
+  describeArchitectureBlock,
+  formatDate,
+  getRunConsoleData,
+} from "../../../lib/consoleData";
 
 export default async function ArchitecturePage(props: {
   params: Promise<{ runId: string }>;
@@ -31,6 +36,10 @@ export default async function ArchitecturePage(props: {
     (!latestAssistantMessage ||
       new Date(latestUserMessage.created_at).getTime() >
         new Date(latestAssistantMessage.created_at).getTime());
+  const architectureBlock = describeArchitectureBlock(
+    gates.unresolvedClarifications,
+    gates.unresolvedOpenQuestions
+  );
 
   return (
     <ConsoleChrome run={run.run} projectLabel={projectLabel}>
@@ -55,11 +64,24 @@ export default async function ArchitecturePage(props: {
               "Generate the first architecture pack to activate the wireframe and refinement loop."}
           </p>
 
+          {architecturePack ? (
+            <div className="mt-5 border border-[color:var(--line)] bg-[color:var(--panel-soft)] p-4">
+              <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--accent)]">
+                Diagram behavior
+              </p>
+              <p className="mt-3 text-sm leading-7 text-[color:var(--ink)]">
+                Non-AWS projects render as a neutral systems map with deployment targets and runtime
+                roles. AWS projects can still show an AWS systems view when the architecture is
+                actually AWS-oriented.
+              </p>
+            </div>
+          ) : null}
+
           <div className="mt-6 flex flex-wrap gap-3">
             {architecturePack ? (
               gates.architectureBlocked ? (
                 <div className="border border-[color:var(--warning)] bg-[color:var(--panel-soft)] px-4 py-3 font-mono text-xs uppercase tracking-[0.18em] text-[color:var(--warning)]">
-                  Answer clarifying questions before decomposing
+                  {architectureBlock?.cta ?? "Resolve architecture blockers before decomposing"}
                 </div>
               ) : (
                 <Link
@@ -79,10 +101,11 @@ export default async function ArchitecturePage(props: {
           {architecturePack && gates.architectureBlocked ? (
             <div className="mt-6 border border-[color:var(--warning)] bg-[color:var(--panel-soft)] p-4">
               <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--warning)]">
-                Architecture blocked
+                {architectureBlock?.title ?? "Architecture blocked"}
               </p>
               <p className="mt-3 text-sm leading-7 text-[color:var(--ink)]">
-                Decomposition is blocked until architecture-shaping questions are answered through refinement.
+                {architectureBlock?.detail ??
+                  "Decomposition is blocked until architecture-shaping questions are answered through refinement."}
               </p>
               <div className="mt-4 grid gap-3 sm:grid-cols-2">
                 <div>
@@ -219,9 +242,11 @@ export default async function ArchitecturePage(props: {
                 </p>
               </div>
               <div className="border border-[color:var(--line)] bg-[color:var(--panel-soft)] p-4">
-                <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)]">Flows</p>
+                <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)]">Relationships</p>
                 <p className="mt-3 text-3xl font-semibold text-[color:var(--ink-strong)]">
-                  {architecturePack.architecture.data_flows.length}
+                  {architecturePack.architecture.relationships.length > 0
+                    ? architecturePack.architecture.relationships.length
+                    : architecturePack.architecture.data_flows.length}
                 </p>
               </div>
               <div className="border border-[color:var(--line)] bg-[color:var(--panel-soft)] p-4">
@@ -362,13 +387,12 @@ export default async function ArchitecturePage(props: {
                 </label>
               </div>
 
-              <button
-                type="submit"
+              <FormSubmitButton
+                idleLabel="Submit refinement"
+                pendingLabel="Submitting refinement..."
                 disabled={gates.execActive}
                 className="w-full border border-[color:var(--accent)] bg-[color:var(--accent)] px-4 py-3 font-mono text-xs uppercase tracking-[0.18em] text-white transition hover:bg-transparent hover:text-[color:var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                Submit refinement
-              </button>
+              />
             </form>
           </section>
 

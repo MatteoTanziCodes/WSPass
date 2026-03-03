@@ -7,21 +7,32 @@ import {
   CreateRunRequestSchema,
   CreateRunResponseSchema,
   DeleteRunResponseSchema,
+  DispatchRunRequestSchema,
   DispatchRunParamsSchema,
   DispatchRunResponseSchema,
   GetArtifactParamsSchema,
   GetArtifactResponseSchema,
+  GetRunLogParamsSchema,
   GetRunResponseSchema,
+  ListRunLogsResponseSchema,
   ListRunsResponseSchema,
   RunIdParamsSchema,
   UpdateExecutionRequestSchema,
   UpdateExecutionResponseSchema,
   UpdateArchitectureChatRequestSchema,
   UpdateArchitectureChatResponseSchema,
+  UpdateBuildStateRequestSchema,
+  UpdateBuildStateResponseSchema,
   UpdateDecompositionReviewStateRequestSchema,
   UpdateDecompositionReviewStateResponseSchema,
   UpdateDecompositionStateRequestSchema,
   UpdateDecompositionStateResponseSchema,
+  UpdateIssueContextQuestionsRequestSchema,
+  UpdateIssueContextQuestionsResponseSchema,
+  UpdateIssueExecutionStateRequestSchema,
+  UpdateIssueExecutionStateResponseSchema,
+  UpdateIssueRequirementsRequestSchema,
+  UpdateIssueRequirementsResponseSchema,
   UpdateImplementationStateRequestSchema,
   UpdateImplementationStateResponseSchema,
   UpdateRepoStateRequestSchema,
@@ -30,6 +41,7 @@ import {
   UpdateRunResponseSchema,
   UploadArtifactRequestSchema,
   UploadArtifactResponseSchema,
+  IssueExecutionParamsSchema,
 } from "./runs.dtos";
 import {
   GitHubActionsConfigError,
@@ -58,16 +70,53 @@ export function createRunsController(deps: {
 }) {
   const { runStore } = deps;
 
+  async function ensureBuildStateStarted(runId: string) {
+    const run = await runStore.getRun(runId);
+    const now = new Date().toISOString();
+    const currentBuildState = run.build_state;
+
+    if (currentBuildState?.status === "running" || currentBuildState?.status === "planning") {
+      return;
+    }
+
+    await runStore.updateBuildState(runId, {
+      status: "planning",
+      started_at: currentBuildState?.started_at ?? now,
+      completed_at: undefined,
+      current_ring: currentBuildState?.current_ring ?? 0,
+      max_parallel_workers: currentBuildState?.max_parallel_workers ?? 3,
+      issues: currentBuildState?.issues ?? [],
+      blocked_reason: undefined,
+      summary: "Starting build orchestrator.",
+      audit_artifact_name: currentBuildState?.audit_artifact_name,
+    });
+  }
+
+  async function failBuildState(runId: string, reason: string) {
+    const run = await runStore.getRun(runId);
+    const now = new Date().toISOString();
+    const currentBuildState = run.build_state;
+
+    await runStore.updateBuildState(runId, {
+      status: "failed",
+      started_at: currentBuildState?.started_at ?? now,
+      completed_at: now,
+      current_ring: currentBuildState?.current_ring ?? 0,
+      max_parallel_workers: currentBuildState?.max_parallel_workers ?? 3,
+      issues: currentBuildState?.issues ?? [],
+      blocked_reason: reason,
+      summary: reason,
+      audit_artifact_name: currentBuildState?.audit_artifact_name,
+    });
+  }
+
   async function assertArchitectureClarificationsResolved(runId: string) {
     const artifact = await runStore.readArtifact(runId, "architecture_pack");
     const pack = ArchitecturePackSchema.parse(artifact.payload);
-    const hasDefaultedClarifications = pack.clarifications.some((item) => item.default_used);
     const hasOpenQuestions = pack.open_questions.length > 0;
 
-    if (hasDefaultedClarifications || hasOpenQuestions) {
-      throw new RunConflictError(
-        "Cannot proceed beyond architecture while clarifying questions remain unanswered."
-      );
+    if (hasOpenQuestions) {
+      throw new RunConflictError("Cannot proceed beyond architecture while open questions remain unanswered.");
     }
   }
 
@@ -149,10 +198,16 @@ export function createRunsController(deps: {
         | "phase2-repo-provision"
         | "phase2-decomposition"
         | "phase2-decomposition-iterator"
-        | "phase2-implementation" =
+        | "phase2-implementation"
+        | "phase3-build-orchestrator"
+        | "phase3-issue-execution"
+        | "phase3-pr-supervisor" =
         "phase1-planner";
+      let issueId: string | undefined;
 
       try {
+        const body = DispatchRunRequestSchema.parse((request as { body?: unknown }).body ?? {});
+        issueId = body.issue_id;
         if ((request.params as Record<string, unknown>)?.workflowName) {
           const params = DispatchRunParamsSchema.parse(request.params);
           runId = params.runId;
@@ -172,10 +227,38 @@ export function createRunsController(deps: {
           }
         }
 
+        if (workflowName === "phase3-build-orchestrator") {
+          await runStore.readArtifact(runId, "architecture_pack");
+          const run = await runStore.getRun(runId);
+          if (!run.repo_state) {
+            throw new RunConflictError("Cannot start build before target repo is resolved.");
+          }
+          if (!run.decomposition_review_state || run.decomposition_review_state.status !== "synced") {
+            throw new RunConflictError("Cannot start build before issues are synced.");
+          }
+          if (!run.implementation_state?.issues.length) {
+            throw new RunConflictError("Cannot start build without synced implementation issues.");
+          }
+          await ensureBuildStateStarted(runId);
+        }
+
+        if (workflowName === "phase3-issue-execution" || workflowName === "phase3-pr-supervisor") {
+          if (!issueId) {
+            throw new RunConflictError(`${workflowName} requires issue_id.`);
+          }
+          const run = await runStore.getRun(runId);
+          const issueExists = run.build_state?.issues.some((issue) => issue.issue_id === issueId);
+          if (!issueExists) {
+            throw new RunConflictError(`Issue ${issueId} is not part of this run's build state.`);
+          }
+        }
+
         if (
           workflowName === "phase2-decomposition" ||
           workflowName === "phase2-decomposition-iterator" ||
-          workflowName === "phase1-architecture-refinement"
+          workflowName === "phase1-architecture-refinement" ||
+          workflowName === "phase3-issue-execution" ||
+          workflowName === "phase3-pr-supervisor"
         ) {
           await runStore.readArtifact(runId, "architecture_pack");
         }
@@ -221,6 +304,7 @@ export function createRunsController(deps: {
           await localWorkflowRunner.dispatchWorkflow({
             workflowName,
             runId,
+            issueId,
           });
         } else {
           const githubActionsClient = new GitHubActionsClient();
@@ -228,6 +312,7 @@ export function createRunsController(deps: {
             workflowName,
             runId,
             apiBaseUrl: resolveApiBaseUrl(request),
+            issueId,
           });
         }
 
@@ -241,6 +326,9 @@ export function createRunsController(deps: {
       } catch (err: any) {
         if (err instanceof GitHubActionsDispatchError) {
           const failedRun = await runStore.failExecution(runId, err.message);
+          if (workflowName === "phase3-build-orchestrator") {
+            await failBuildState(runId, err.message);
+          }
           return reply
             .code(502)
             .send({ error: "dispatch_failed", message: err.message, execution: failedRun.execution });
@@ -254,12 +342,18 @@ export function createRunsController(deps: {
         if (err instanceof GitHubActionsConfigError) {
           if (queued) {
             await runStore.failExecution(runId, err.message);
+            if (workflowName === "phase3-build-orchestrator") {
+              await failBuildState(runId, err.message);
+            }
           }
           return reply.code(500).send({ error: "server_misconfigured", message: err.message });
         }
         if (err instanceof LocalWorkflowRunnerError) {
           if (queued) {
             await runStore.failExecution(runId, err.message);
+            if (workflowName === "phase3-build-orchestrator") {
+              await failBuildState(runId, err.message);
+            }
           }
           return reply.code(500).send({ error: "local_dispatch_failed", message: err.message });
         }
@@ -281,6 +375,41 @@ export function createRunsController(deps: {
         }
         if (err instanceof RunConflictError) {
           return reply.code(404).send({ error: "artifact_not_found", message: err.message });
+        }
+        if (err instanceof z.ZodError) {
+          return reply.code(400).send({ error: "bad_request", issues: err.issues });
+        }
+        throw err;
+      }
+    },
+
+    async listRunLogs(request: FastifyRequest, reply: FastifyReply) {
+      try {
+        const { runId } = RunIdParamsSchema.parse(request.params);
+        const logs = await runStore.listLogs(runId);
+        return reply.send(ListRunLogsResponseSchema.parse({ logs }));
+      } catch (err: any) {
+        if (err instanceof RunNotFoundError) {
+          return reply.code(404).send({ error: "run_not_found", message: err.message });
+        }
+        if (err instanceof z.ZodError) {
+          return reply.code(400).send({ error: "bad_request", issues: err.issues });
+        }
+        throw err;
+      }
+    },
+
+    async getRunLog(request: FastifyRequest, reply: FastifyReply) {
+      try {
+        const { runId, logName } = GetRunLogParamsSchema.parse(request.params);
+        const log = await runStore.readLog(runId, logName);
+        return reply.type("text/plain; charset=utf-8").send(log.payload);
+      } catch (err: any) {
+        if (err instanceof RunNotFoundError) {
+          return reply.code(404).send({ error: "run_not_found", message: err.message });
+        }
+        if (err instanceof RunConflictError) {
+          return reply.code(404).send({ error: "log_not_found", message: err.message });
         }
         if (err instanceof z.ZodError) {
           return reply.code(400).send({ error: "bad_request", issues: err.issues });
@@ -411,6 +540,83 @@ export function createRunsController(deps: {
       } catch (err: any) {
         if (err instanceof RunNotFoundError) {
           return reply.code(404).send({ error: "run_not_found", message: err.message });
+        }
+        if (err instanceof z.ZodError) {
+          return reply.code(400).send({ error: "bad_request", issues: err.issues });
+        }
+        throw err;
+      }
+    },
+
+    async updateBuildState(request: FastifyRequest, reply: FastifyReply) {
+      try {
+        const { runId } = RunIdParamsSchema.parse(request.params);
+        const body = UpdateBuildStateRequestSchema.parse((request as { body?: unknown }).body);
+        const run = await runStore.updateBuildState(runId, body);
+        return reply.send(UpdateBuildStateResponseSchema.parse({ run }));
+      } catch (err: any) {
+        if (err instanceof RunNotFoundError) {
+          return reply.code(404).send({ error: "run_not_found", message: err.message });
+        }
+        if (err instanceof z.ZodError) {
+          return reply.code(400).send({ error: "bad_request", issues: err.issues });
+        }
+        throw err;
+      }
+    },
+
+    async updateIssueExecutionState(request: FastifyRequest, reply: FastifyReply) {
+      try {
+        const { runId, issueId } = IssueExecutionParamsSchema.parse(request.params);
+        const body = UpdateIssueExecutionStateRequestSchema.parse((request as { body?: unknown }).body);
+        const run = await runStore.updateIssueExecutionState(runId, issueId, body);
+        return reply.send(UpdateIssueExecutionStateResponseSchema.parse({ run }));
+      } catch (err: any) {
+        if (err instanceof RunNotFoundError) {
+          return reply.code(404).send({ error: "run_not_found", message: err.message });
+        }
+        if (err instanceof RunConflictError) {
+          return reply.code(409).send({ error: "run_conflict", message: err.message });
+        }
+        if (err instanceof z.ZodError) {
+          return reply.code(400).send({ error: "bad_request", issues: err.issues });
+        }
+        throw err;
+      }
+    },
+
+    async updateIssueRequirements(request: FastifyRequest, reply: FastifyReply) {
+      try {
+        const { runId, issueId } = IssueExecutionParamsSchema.parse(request.params);
+        const body = UpdateIssueRequirementsRequestSchema.parse((request as { body?: unknown }).body);
+        const run = await runStore.resolveIssueRequirements(runId, issueId, body.requirements);
+        return reply.send(UpdateIssueRequirementsResponseSchema.parse({ run }));
+      } catch (err: any) {
+        if (err instanceof RunNotFoundError) {
+          return reply.code(404).send({ error: "run_not_found", message: err.message });
+        }
+        if (err instanceof RunConflictError) {
+          return reply.code(409).send({ error: "run_conflict", message: err.message });
+        }
+        if (err instanceof z.ZodError) {
+          return reply.code(400).send({ error: "bad_request", issues: err.issues });
+        }
+        throw err;
+      }
+    },
+
+    async updateIssueContextQuestions(request: FastifyRequest, reply: FastifyReply) {
+      try {
+        const { runId, issueId } = IssueExecutionParamsSchema.parse(request.params);
+        const body = UpdateIssueContextQuestionsRequestSchema.parse((request as { body?: unknown }).body);
+        const run = await runStore.answerIssueContextQuestions(runId, issueId, body.questions);
+        return reply.send(UpdateIssueContextQuestionsResponseSchema.parse({ run }));
+      } catch (err: any) {
+        if (err instanceof RunNotFoundError) {
+          return reply.code(404).send({ error: "run_not_found", message: err.message });
+        }
+        if (err instanceof RunConflictError) {
+          return reply.code(409).send({ error: "run_conflict", message: err.message });
         }
         if (err instanceof z.ZodError) {
           return reply.code(400).send({ error: "bad_request", issues: err.issues });

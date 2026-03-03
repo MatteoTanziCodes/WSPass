@@ -11,33 +11,33 @@ import {
 function progressTileTone(state: "active" | "completed" | "pending" | "blocked") {
   if (state === "blocked") {
     return {
-      borderColor: "rgba(255, 118, 118, 0.92)",
-      backgroundColor: "rgba(255, 118, 118, 0.08)",
-      stripeColor: "rgba(255, 118, 118, 1)",
-      labelColor: "rgba(255, 215, 215, 0.98)",
-      statusColor: "rgba(255, 118, 118, 1)",
-      detailColor: "rgba(255, 176, 176, 0.92)",
+      borderColor: "var(--danger)",
+      backgroundColor: "var(--danger-soft)",
+      stripeColor: "var(--danger)",
+      labelColor: "var(--ink-strong)",
+      statusColor: "var(--danger-ink)",
+      detailColor: "var(--danger-ink)",
     };
   }
 
   if (state === "completed") {
     return {
-      borderColor: "rgba(53, 219, 149, 0.92)",
-      backgroundColor: "rgba(53, 219, 149, 0.08)",
-      stripeColor: "rgba(53, 219, 149, 1)",
-      labelColor: "rgba(231, 255, 242, 0.98)",
-      statusColor: "rgba(53, 219, 149, 1)",
-      detailColor: "rgba(143, 245, 190, 0.92)",
+      borderColor: "var(--success)",
+      backgroundColor: "var(--success-soft)",
+      stripeColor: "var(--success)",
+      labelColor: "var(--ink-strong)",
+      statusColor: "var(--success-ink)",
+      detailColor: "var(--success-ink)",
     };
   }
 
   return {
-    borderColor: "rgba(255, 148, 77, 0.92)",
-    backgroundColor: "rgba(255, 148, 77, 0.08)",
-    stripeColor: "rgba(255, 148, 77, 1)",
-    labelColor: "rgba(255, 244, 233, 0.98)",
-    statusColor: "rgba(255, 148, 77, 1)",
-    detailColor: "rgba(255, 205, 166, 0.92)",
+    borderColor: "var(--warning)",
+    backgroundColor: "var(--warning-soft)",
+    stripeColor: "var(--warning)",
+    labelColor: "var(--ink-strong)",
+    statusColor: "var(--warning-ink)",
+    detailColor: "var(--warning-ink)",
   };
 }
 

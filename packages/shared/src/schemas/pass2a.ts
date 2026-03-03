@@ -32,7 +32,21 @@ export const OrgConstraintsSchema = z
 
     cloud: z
       .object({
-        provider: z.enum(["aws", "gcp", "azure", "none"]).default("aws"),
+        provider: z
+          .enum([
+            "aws",
+            "gcp",
+            "azure",
+            "vercel",
+            "cloudflare",
+            "netlify",
+            "supabase",
+            "render",
+            "railway",
+            "generic",
+            "none",
+          ])
+          .default("aws"),
         allowed_services: z.array(z.string().min(1)).default(["rds", "s3", "sqs"]),
       })
       .default({ provider: "aws", allowed_services: ["rds", "s3", "sqs"] }),
@@ -142,10 +156,98 @@ export const NfrsSchema = z
   })
   .strict();
 
+export const DeploymentProviderSchema = z.enum([
+  "aws",
+  "gcp",
+  "azure",
+  "vercel",
+  "cloudflare",
+  "netlify",
+  "supabase",
+  "render",
+  "railway",
+  "generic",
+  "none",
+  "other",
+]);
+
+export const DeploymentTargetSchema = z.enum([
+  "browser",
+  "edge_cdn",
+  "static_host",
+  "app_server",
+  "serverless_function",
+  "container_service",
+  "managed_database",
+  "object_storage",
+  "queue_service",
+  "cache_service",
+  "auth_service",
+  "third_party_api",
+  "build_pipeline",
+  "observability_service",
+]);
+
+export const RuntimeKindSchema = z.enum([
+  "static_bundle",
+  "browser_js",
+  "node",
+  "edge_runtime",
+  "worker_runtime",
+  "managed",
+  "external",
+  "none",
+]);
+
+export const DisplayRoleSchema = z.enum([
+  "presentation",
+  "build",
+  "execution",
+  "data",
+  "identity",
+  "integration",
+  "observability",
+]);
+
+export const ComponentDeploymentBindingSchema = z
+  .object({
+    provider: DeploymentProviderSchema.default("generic"),
+    target: DeploymentTargetSchema,
+    runtime: RuntimeKindSchema.default("none"),
+    service_label: z.string().optional(),
+    artifact_label: z.string().optional(),
+  })
+  .strict();
+
 export const ArchitectureComponentSchema = z
   .object({
     name: z.string().min(1),
     type: ComponentTypeSchema,
+    responsibility: z.string().min(1).optional(),
+    display_role: DisplayRoleSchema.optional(),
+    deployment: ComponentDeploymentBindingSchema.optional(),
+  })
+  .strict();
+
+export const RelationshipKindSchema = z.enum([
+  "request",
+  "serve",
+  "read",
+  "write",
+  "publish",
+  "consume",
+  "authenticate",
+  "observe",
+  "build",
+  "deploy",
+]);
+
+export const ArchitectureRelationshipSchema = z
+  .object({
+    from: z.string().min(1),
+    to: z.string().min(1),
+    kind: RelationshipKindSchema,
+    label: z.string().min(1),
   })
   .strict();
 
@@ -163,6 +265,7 @@ export const ArchitectureSchema = z
     description: z.string().min(1),
     components: z.array(ArchitectureComponentSchema).min(1),
     data_flows: z.array(z.string().min(1)).default([]),
+    relationships: z.array(ArchitectureRelationshipSchema).default([]),
     data_stores: z.array(z.string().min(1)).default([]),
     async_patterns: z.array(z.string().min(1)).default([]),
     api_surface: z.array(z.string().min(1)).default([]),

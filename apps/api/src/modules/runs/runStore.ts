@@ -4,7 +4,10 @@ import { promises as fs } from "node:fs";
 
 import type {
   ArchitectureChatState,
+  BuildOrchestrationState,
+  DecompositionClarifyingQuestion,
   DecompositionReviewQuestionAnswerRequest,
+  DecompositionReviewArtifact,
   DecompositionReviewState,
   DecompositionState,
   ImplementationIssueStateCollection,
@@ -14,7 +17,9 @@ import type {
   RunExecution,
   RunExecutionStatus,
   WorkflowName,
+  IssueExecutionState,
 } from "@pass/shared";
+import { DecompositionClarifyingQuestionSchema, DecompositionReviewArtifactSchema } from "@pass/shared";
 import { ArtifactsIndexSchema, ArtifactMetadataSchema, RunDetailSchema, RunsIndexSchema } from "./runs.schemas";
 import type { ArtifactMetadata, RunDetail, RunRecord } from "./runs.schemas";
 import {
@@ -140,6 +145,7 @@ export class RunStore {
         repo_state?: RunDetail["repo_state"];
         decomposition_state?: RunDetail["decomposition_state"];
         decomposition_review_state?: RunDetail["decomposition_review_state"];
+        build_state?: RunDetail["build_state"];
       }
     >
   > {
@@ -158,6 +164,7 @@ export class RunStore {
           repo_state: run.repo_state,
           decomposition_state: run.decomposition_state,
           decomposition_review_state: run.decomposition_review_state,
+          build_state: run.build_state,
         };
       })
     );
@@ -351,6 +358,55 @@ export class RunStore {
     return { artifact, payload };
   }
 
+  async listLogs(runId: string): Promise<Array<{ name: string; size_bytes: number; updated_at: string }>> {
+    await this.getRun(runId);
+
+    const logsDir = path.join(this.getRunDir(runId), "logs");
+    try {
+      const entries = await fs.readdir(logsDir, { withFileTypes: true });
+      const files = await Promise.all(
+        entries
+          .filter((entry) => entry.isFile())
+          .map(async (entry) => {
+            const stats = await fs.stat(path.join(logsDir, entry.name));
+            return {
+              name: entry.name,
+              size_bytes: stats.size,
+              updated_at: stats.mtime.toISOString(),
+            };
+          })
+      );
+
+      return files.sort((left, right) => left.name.localeCompare(right.name));
+    } catch (error: any) {
+      if (error?.code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  async readLog(runId: string, logName: string): Promise<{ name: string; payload: string }> {
+    await this.getRun(runId);
+
+    const safeName = path.basename(logName);
+    const logsDir = path.join(this.getRunDir(runId), "logs");
+    const filePath = path.join(logsDir, safeName);
+
+    try {
+      const payload = await fs.readFile(filePath, "utf8");
+      return {
+        name: safeName,
+        payload,
+      };
+    } catch (error: any) {
+      if (error?.code === "ENOENT") {
+        throw new RunConflictError(`Log not found for run ${runId}: ${safeName}`);
+      }
+      throw error;
+    }
+  }
+
   async updateImplementationState(
     runId: string,
     implementationState: ImplementationIssueStateCollection
@@ -360,6 +416,107 @@ export class RunStore {
       ...existing,
       implementation_state: implementationState,
     });
+  }
+
+  async updateBuildState(runId: string, buildState: BuildOrchestrationState): Promise<RunDetail> {
+    const existing = await this.getRun(runId);
+    return this.persistRun({
+      ...existing,
+      build_state: buildState,
+    });
+  }
+
+  async updateIssueExecutionState(
+    runId: string,
+    issueId: string,
+    issueState: IssueExecutionState
+  ): Promise<RunDetail> {
+    const existing = await this.getRun(runId);
+    const currentBuildState = existing.build_state;
+    if (!currentBuildState) {
+      throw new RunConflictError("Build state has not been created for this run.");
+    }
+
+    const nextIssues = [
+      ...currentBuildState.issues.filter((issue) => issue.issue_id !== issueId),
+      issueState,
+    ].sort((left, right) => left.issue_id.localeCompare(right.issue_id));
+
+    return this.persistRun({
+      ...existing,
+      build_state: {
+        ...currentBuildState,
+        issues: nextIssues,
+      },
+    });
+  }
+
+  async resolveIssueRequirements(
+    runId: string,
+    issueId: string,
+    requirements: Array<{ id: string; status: "open" | "provided" | "resolved"; resolved_at?: string }>
+  ): Promise<RunDetail> {
+    const existing = await this.getRun(runId);
+    const currentBuildState = existing.build_state;
+    if (!currentBuildState) {
+      throw new RunConflictError("Build state has not been created for this run.");
+    }
+
+    const targetIssue = currentBuildState.issues.find((issue) => issue.issue_id === issueId);
+    if (!targetIssue) {
+      throw new RunConflictError(`Build issue state not found for run ${runId}: ${issueId}`);
+    }
+
+    const nextIssue: IssueExecutionState = {
+      ...targetIssue,
+      secret_requirements: targetIssue.secret_requirements.map((requirement) => {
+        const patch = requirements.find((candidate) => candidate.id === requirement.id);
+        return patch ? { ...requirement, status: patch.status, resolved_at: patch.resolved_at } : requirement;
+      }),
+      last_updated_at: new Date().toISOString(),
+    };
+
+    return this.updateIssueExecutionState(runId, issueId, nextIssue);
+  }
+
+  async answerIssueContextQuestions(
+    runId: string,
+    issueId: string,
+    questions: Array<{
+      id: string;
+      status: "open" | "answered" | "resolved";
+      answer?: string;
+      answered_at?: string;
+    }>
+  ): Promise<RunDetail> {
+    const existing = await this.getRun(runId);
+    const currentBuildState = existing.build_state;
+    if (!currentBuildState) {
+      throw new RunConflictError("Build state has not been created for this run.");
+    }
+
+    const targetIssue = currentBuildState.issues.find((issue) => issue.issue_id === issueId);
+    if (!targetIssue) {
+      throw new RunConflictError(`Build issue state not found for run ${runId}: ${issueId}`);
+    }
+
+    const nextIssue: IssueExecutionState = {
+      ...targetIssue,
+      context_questions: targetIssue.context_questions.map((question) => {
+        const patch = questions.find((candidate) => candidate.id === question.id);
+        return patch
+          ? {
+              ...question,
+              status: patch.status,
+              answer: patch.answer,
+              answered_at: patch.answered_at,
+            }
+          : question;
+      }),
+      last_updated_at: new Date().toISOString(),
+    };
+
+    return this.updateIssueExecutionState(runId, issueId, nextIssue);
   }
 
   async updateRepoState(runId: string, repoState: RepoState): Promise<RunDetail> {
@@ -408,21 +565,66 @@ export class RunStore {
       throw new RunConflictError("Decomposition review state has not been created for this run.");
     }
 
-    const updatedQuestions = reviewState.questions.map((question) =>
-      question.id === answer.question_id
-        ? {
-            ...question,
-            status: "answered" as const,
-            answer: answer.answer,
-            answered_at: new Date().toISOString(),
-          }
-        : question
-    );
+    const now = new Date().toISOString();
+    const updatedQuestions = [...reviewState.questions];
+    const targetQuestionId = answer.question_id?.trim();
+    const targetGapId = answer.gap_id?.trim();
 
-    const targetQuestion = updatedQuestions.find((question) => question.id === answer.question_id);
-    if (!targetQuestion) {
+    let targetIndex = targetQuestionId
+      ? updatedQuestions.findIndex((question) => question.id === targetQuestionId)
+      : -1;
+
+    if (targetIndex === -1 && targetGapId) {
+      targetIndex = updatedQuestions.findIndex((question) =>
+        question.derived_from_gap_ids.includes(targetGapId)
+      );
+    }
+
+    if (targetIndex >= 0) {
+      updatedQuestions[targetIndex] = {
+        ...updatedQuestions[targetIndex],
+        status: "answered",
+        answer: answer.answer,
+        answered_at: now,
+      };
+    } else if (targetGapId) {
+      const reviewArtifact = await this.readArtifact(runId, "decomposition_review");
+      const parsedReview = DecompositionReviewArtifactSchema.parse(
+        reviewArtifact.payload
+      ) as DecompositionReviewArtifact;
+      const targetGap = parsedReview.gaps.find((gap) => gap.id === targetGapId);
+
+      if (!targetGap) {
+        throw new RunConflictError(
+          `Decomposition review gap not found for run ${runId}: ${targetGapId}`
+        );
+      }
+
+      const synthesizedQuestion: DecompositionClarifyingQuestion =
+        DecompositionClarifyingQuestionSchema.parse({
+          id: `dq_gap_${targetGap.id}`,
+          prompt: `Resolve coverage gap: ${targetGap.summary}`,
+          rationale:
+            targetGap.why_blocked ??
+            targetGap.resolution_notes ??
+            "The iterator still needs this missing information before it can safely complete issue generation.",
+          status: "answered",
+          answer: answer.answer,
+          created_at: now,
+          answered_at: now,
+          related_requirement_ids: targetGap.affected_requirement_ids,
+          related_components: targetGap.affected_components,
+          derived_from_gap_ids: [targetGap.id],
+          missing_information: targetGap.missing_information,
+          evidence: targetGap.evidence,
+          recommended_inputs: targetGap.recommended_inputs,
+          expected_issue_outcomes: targetGap.expected_issue_outcomes,
+        });
+
+      updatedQuestions.push(synthesizedQuestion);
+    } else {
       throw new RunConflictError(
-        `Decomposition review question not found for run ${runId}: ${answer.question_id}`
+        `Decomposition review question not found for run ${runId}: ${targetQuestionId ?? "unknown"}`
       );
     }
 

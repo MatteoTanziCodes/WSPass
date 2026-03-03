@@ -18,6 +18,10 @@ import {
   normalizeOrgConstraintsToYaml,
   normalizePrdToYaml,
 } from "../providers/llmClient";
+import {
+  LlmObservabilityRecorder,
+  withLlmObservabilityRecorder,
+} from "../lib/llmObservability";
 
 const RunDetailSchema = z
   .object({
@@ -327,34 +331,54 @@ function buildFailureMessage(error: unknown) {
 }
 
 export async function runPlannerAgent(runId: string): Promise<void> {
+  const baseUrl = readRequiredEnv("PASS_API_BASE_URL");
+  const token = readRequiredEnv("PASS_API_TOKEN");
   const api = new PassApiClient({
-    baseUrl: readRequiredEnv("PASS_API_BASE_URL"),
-    token: readRequiredEnv("PASS_API_TOKEN"),
+    baseUrl,
+    token,
   });
 
   const githubRunId = process.env.GITHUB_RUN_ID ? Number(process.env.GITHUB_RUN_ID) : undefined;
   const githubRunUrl = process.env.GITHUB_RUN_URL;
+  let recorder: LlmObservabilityRecorder | undefined;
+  let sessionStatus: "running" | "succeeded" | "failed" = "running";
 
   try {
     const run = await api.getRun(runId);
-    if (!run.input) {
+    const runInput = run.input;
+    if (!runInput) {
       throw new Error("Run input is missing.");
     }
+    recorder = new LlmObservabilityRecorder({
+      runId,
+      workflowName: "phase1-planner",
+      backend: run.execution?.backend,
+      model: process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6",
+    });
 
     const brandAssetsManifest = await api.getBrandAssetsManifest();
 
-    const normalizedPrd = await normalizePrdToYaml(run.input.prd_text);
-    const normalizedOrgConstraints = await normalizeOrgConstraintsToYaml(
-      run.input.org_constraints_text
-    );
-    const normalizedDesignGuidelines = await normalizeDesignGuidelinesToYaml(
-      run.input.design_guidelines_text
-    );
+    const { normalizedPrd, normalizedOrgConstraints, normalizedDesignGuidelines } =
+      await withLlmObservabilityRecorder(recorder, async () => {
+        const normalizedPrd = await normalizePrdToYaml(runInput.prd_text);
+        const normalizedOrgConstraints = await normalizeOrgConstraintsToYaml(
+          runInput.org_constraints_text
+        );
+        const normalizedDesignGuidelines = await normalizeDesignGuidelinesToYaml(
+          runInput.design_guidelines_text
+        );
+
+        return {
+          normalizedPrd,
+          normalizedOrgConstraints,
+          normalizedDesignGuidelines,
+        };
+      });
 
     // Append brand assets context to PRD text so the planner sees it without changing typed org constraints.
     const plannerPrdText = brandAssetsManifest
-      ? `${run.input.prd_text}\n\n${brandAssetsManifest}`
-      : run.input.prd_text;
+      ? `${runInput.prd_text}\n\n${brandAssetsManifest}`
+      : runInput.prd_text;
 
     await api.updateExecution(runId, {
       status: "running",
@@ -365,15 +389,17 @@ export async function runPlannerAgent(runId: string): Promise<void> {
     await api.updateRun(runId, { status: "parsed", current_step: "parse" });
 
     const pack = ArchitecturePackSchema.parse(
-      await generateArchitecturePack({
-        runId,
-        prdText: plannerPrdText,
-        normalizedPrdYaml: normalizedPrd.yaml,
-        orgConstraints: normalizedOrgConstraints.normalized,
-        normalizedOrgConstraintsYaml: normalizedOrgConstraints.yaml,
-        designGuidelines: normalizedDesignGuidelines.normalized,
-        normalizedDesignGuidelinesYaml: normalizedDesignGuidelines.yaml,
-      })
+      await withLlmObservabilityRecorder(recorder, () =>
+        generateArchitecturePack({
+          runId,
+          prdText: plannerPrdText,
+          normalizedPrdYaml: normalizedPrd.yaml,
+          orgConstraints: normalizedOrgConstraints.normalized,
+          normalizedOrgConstraintsYaml: normalizedOrgConstraints.yaml,
+          designGuidelines: normalizedDesignGuidelines.normalized,
+          normalizedDesignGuidelinesYaml: normalizedDesignGuidelines.yaml,
+        })
+      )
     );
 
     await api.updateRun(runId, { status: "plan_generated", current_step: "plan" });
@@ -447,8 +473,10 @@ export async function runPlannerAgent(runId: string): Promise<void> {
       github_run_id: Number.isFinite(githubRunId) ? githubRunId : undefined,
       github_run_url: githubRunUrl,
     });
+    sessionStatus = "succeeded";
   } catch (error) {
     const message = buildFailureMessage(error);
+    sessionStatus = "failed";
 
     try {
       await api.updateRun(runId, { status: "failed" });
@@ -468,5 +496,14 @@ export async function runPlannerAgent(runId: string): Promise<void> {
     }
 
     throw error;
+  } finally {
+    if (recorder) {
+      recorder.complete(sessionStatus);
+      try {
+        await recorder.flush({ baseUrl, token });
+      } catch {
+        // Preserve the primary workflow result if observability flush fails.
+      }
+    }
   }
 }

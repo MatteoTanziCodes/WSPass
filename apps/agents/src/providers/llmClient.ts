@@ -1,9 +1,12 @@
+import { createHash } from "node:crypto";
 import { stringify as stringifyYaml } from "yaml";
 import { z } from "zod";
 import {
   ArchitecturePackSchema,
+  DecompositionExpectedIssueSchema,
   DecompositionGapSchema,
   DecompositionPlanSchema,
+  DecompositionRecommendedInputSchema,
   DecompositionWorkItemSchema,
   DesignGuidelinesSchema,
   OrgConstraintsSchema,
@@ -15,6 +18,14 @@ import {
   type DecompositionPlan,
   type OrgConstraints,
 } from "@pass/shared";
+import { resolveIntegrationToken } from "../lib/integrationTokens";
+import {
+  createEmptyUsage,
+  getActiveLlmObservabilityRecorder,
+  normalizeUsage,
+  sanitizePromptPayloadForTrace,
+  sanitizeResponsePayloadForTrace,
+} from "../lib/llmObservability";
 
 const TOOL_VERSION = process.env.PASS_2A_VERSION ?? "0.1.0";
 
@@ -81,26 +92,112 @@ const DraftDomainSchema = z.object({
   open_questions: z.array(z.string()).default([]),
 });
 
+const DraftDeploymentProviderSchema = z.enum([
+  "aws",
+  "gcp",
+  "azure",
+  "vercel",
+  "cloudflare",
+  "netlify",
+  "supabase",
+  "render",
+  "railway",
+  "generic",
+  "none",
+  "other",
+]);
+
+const DraftDeploymentTargetSchema = z.enum([
+  "browser",
+  "edge_cdn",
+  "static_host",
+  "app_server",
+  "serverless_function",
+  "container_service",
+  "managed_database",
+  "object_storage",
+  "queue_service",
+  "cache_service",
+  "auth_service",
+  "third_party_api",
+  "build_pipeline",
+  "observability_service",
+]);
+
+const DraftRuntimeKindSchema = z.enum([
+  "static_bundle",
+  "browser_js",
+  "node",
+  "edge_runtime",
+  "worker_runtime",
+  "managed",
+  "external",
+  "none",
+]);
+
+const DraftDisplayRoleSchema = z.enum([
+  "presentation",
+  "build",
+  "execution",
+  "data",
+  "identity",
+  "integration",
+  "observability",
+]);
+
+const DraftComponentDeploymentBindingSchema = z.object({
+  provider: DraftDeploymentProviderSchema.optional(),
+  target: DraftDeploymentTargetSchema,
+  runtime: DraftRuntimeKindSchema.optional(),
+  service_label: z.string().optional(),
+  artifact_label: z.string().optional(),
+});
+
+const DraftArchitectureComponentCoreSchema = z.object({
+  name: z.string(),
+  type: z.enum([
+    "web",
+    "api",
+    "worker",
+    "db",
+    "queue",
+    "cache",
+    "object_storage",
+    "auth_provider",
+    "external_integration",
+  ]),
+  responsibility: z.string().optional(),
+  display_role: DraftDisplayRoleSchema.optional(),
+});
+
+const DraftArchitectureComponentSchema = DraftArchitectureComponentCoreSchema.extend({
+  deployment: DraftComponentDeploymentBindingSchema.optional(),
+});
+
+const DraftArchitectureRelationshipSchema = z.object({
+  from: z.string(),
+  to: z.string(),
+  kind: z.enum([
+    "request",
+    "serve",
+    "read",
+    "write",
+    "publish",
+    "consume",
+    "authenticate",
+    "observe",
+    "build",
+    "deploy",
+  ]),
+  label: z.string(),
+});
+
 const DraftArchitectureSchema = z.object({
   name: z.string(),
   description: z.string(),
-  components: z.array(
-    z.object({
-      name: z.string(),
-      type: z.enum([
-        "web",
-        "api",
-        "worker",
-        "db",
-        "queue",
-        "cache",
-        "object_storage",
-        "auth_provider",
-        "external_integration",
-      ]),
-    })
-  ),
+  components: z.array(DraftArchitectureComponentSchema),
   data_flows: z.array(z.string()).default([]),
+  relationships: z.array(DraftArchitectureRelationshipSchema).default([]),
   data_stores: z.array(z.string()).default([]),
   async_patterns: z.array(z.string()).default([]),
   api_surface: z.array(z.string()).default([]),
@@ -183,8 +280,11 @@ type RefineArchitecturePackInput = {
   messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
 };
 
-const RefinementPlanningUpdateSchema = z.object({
+const RefinementClarificationUpdateSchema = z.object({
   clarifications: z.array(DraftClarificationSchema).default([]),
+});
+
+const RefinementPlanningUpdateSchema = z.object({
   workflows: z.array(DraftWorkflowSchema).default([]),
   requirements: z.array(DraftRequirementSchema).default([]),
 });
@@ -208,6 +308,7 @@ const ArchitectureFragmentSchema = z.object({
   description: z.string().optional(),
   components: DraftArchitectureSchema.shape.components.optional(),
   data_flows: z.array(z.string()).optional(),
+  relationships: z.array(DraftArchitectureRelationshipSchema).optional(),
   data_stores: z.array(z.string()).optional(),
   async_patterns: z.array(z.string()).optional(),
   api_surface: z.array(z.string()).optional(),
@@ -218,11 +319,23 @@ const ArchitectureFragmentSchema = z.object({
 const ArchitectureCoreUpdateSchema = z.object({
   name: z.string().optional(),
   description: z.string().optional(),
-  components: DraftArchitectureSchema.shape.components.optional(),
+  components: z.array(DraftArchitectureComponentCoreSchema).optional(),
+});
+
+const ArchitectureBindingsUpdateSchema = z.object({
+  components: z
+    .array(
+      z.object({
+        name: z.string(),
+        deployment: DraftComponentDeploymentBindingSchema.optional(),
+      })
+    )
+    .optional(),
 });
 
 const ArchitectureTopologyUpdateSchema = z.object({
   data_flows: z.array(z.string()).optional(),
+  relationships: z.array(DraftArchitectureRelationshipSchema).optional(),
   data_stores: z.array(z.string()).optional(),
   async_patterns: z.array(z.string()).optional(),
   api_surface: z.array(z.string()).optional(),
@@ -301,12 +414,28 @@ const IteratorQuestionDraftSchema = z.object({
   rationale: z.string(),
   related_requirement_ids: z.array(z.string()).default([]),
   related_components: z.array(z.string()).default([]),
+  derived_from_gap_ids: z.array(z.string()).default([]),
+  missing_information: z.array(z.string()).default([]),
+  evidence: z.array(z.string()).default([]),
+  recommended_inputs: z.array(DecompositionRecommendedInputSchema).default([]),
+  expected_issue_outcomes: z.array(DecompositionExpectedIssueSchema).default([]),
 });
 
-const DecompositionIteratorReviewSchema = z.object({
+const DecompositionIteratorMetaSchema = z.object({
   summary: z.string(),
+  blocking_summary: z.string().optional(),
+  claude_review_notes: z.array(z.string()).default([]),
+});
+
+const DecompositionIteratorGapBatchSchema = z.object({
   gaps: z.array(DecompositionGapSchema).default([]),
+});
+
+const DecompositionIteratorQuestionBatchSchema = z.object({
   questions: z.array(IteratorQuestionDraftSchema).default([]),
+});
+
+const DecompositionIteratorWorkItemBatchSchema = z.object({
   proposed_work_items: z.array(DecompositionWorkItemSchema).default([]),
 });
 
@@ -518,14 +647,114 @@ function parseRetryAfterMs(headers: Headers) {
   return null;
 }
 
+type AnthropicRequestMetadata = {
+  sectionName: string;
+  toolName?: string;
+  schemaHash?: string;
+};
+
+function safeJsonParse(text: string) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function getAnthropicRequestId(headers: Headers) {
+  return (
+    headers.get("request-id") ??
+    headers.get("x-request-id") ??
+    headers.get("anthropic-request-id") ??
+    undefined
+  );
+}
+
+function getAnthropicUsagePayload(model: string, response: any) {
+  const usage = normalizeUsage({
+    input_tokens: response?.usage?.input_tokens,
+    output_tokens: response?.usage?.output_tokens,
+    cache_creation_input_tokens: response?.usage?.cache_creation_input_tokens,
+    cache_read_input_tokens: response?.usage?.cache_read_input_tokens,
+    estimated_cost_usd: estimateAnthropicCostUsd(model, response?.usage),
+  });
+
+  return usage;
+}
+
+let anthropicPricingCache:
+  | Record<
+      string,
+      {
+        input_usd_per_million?: number;
+        output_usd_per_million?: number;
+        cache_write_usd_per_million?: number;
+        cache_read_usd_per_million?: number;
+      }
+    >
+  | null
+  | undefined;
+
+function getAnthropicPricingConfig() {
+  if (anthropicPricingCache !== undefined) {
+    return anthropicPricingCache;
+  }
+
+  const raw = process.env.ANTHROPIC_MODEL_PRICING_JSON?.trim();
+  if (!raw) {
+    anthropicPricingCache = null;
+    return anthropicPricingCache;
+  }
+
+  try {
+    anthropicPricingCache = JSON.parse(raw) as Record<
+      string,
+      {
+        input_usd_per_million?: number;
+        output_usd_per_million?: number;
+        cache_write_usd_per_million?: number;
+        cache_read_usd_per_million?: number;
+      }
+    >;
+  } catch {
+    anthropicPricingCache = null;
+  }
+
+  return anthropicPricingCache;
+}
+
+function estimateAnthropicCostUsd(model: string, usage: any) {
+  const pricing = getAnthropicPricingConfig()?.[model];
+  if (!pricing) {
+    return null;
+  }
+
+  const inputTokens = Number(usage?.input_tokens ?? 0);
+  const outputTokens = Number(usage?.output_tokens ?? 0);
+  const cacheWriteTokens = Number(usage?.cache_creation_input_tokens ?? 0);
+  const cacheReadTokens = Number(usage?.cache_read_input_tokens ?? 0);
+
+  const components = [
+    ((pricing.input_usd_per_million ?? 0) * inputTokens) / 1_000_000,
+    ((pricing.output_usd_per_million ?? 0) * outputTokens) / 1_000_000,
+    ((pricing.cache_write_usd_per_million ?? 0) * cacheWriteTokens) / 1_000_000,
+    ((pricing.cache_read_usd_per_million ?? 0) * cacheReadTokens) / 1_000_000,
+  ];
+
+  const total = components.reduce((sum, value) => sum + value, 0);
+  return Number.isFinite(total) ? total : null;
+}
+
 async function runAnthropicRequest<T>(
   payload: Record<string, unknown>,
-  parseResponse: (response: any) => T
+  parseResponse: (response: any) => T,
+  metadata: AnthropicRequestMetadata
 ): Promise<T> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error("ANTHROPIC_API_KEY is required.");
-  }
+  const apiKey = await resolveIntegrationToken(
+    "anthropic",
+    ["ANTHROPIC_API_KEY"],
+    "Anthropic access requires a connected admin integration or ANTHROPIC_API_KEY."
+  );
 
   const responseUrl = `${process.env.ANTHROPIC_BASE_URL ?? "https://api.anthropic.com/v1"}/messages`;
   const version = process.env.ANTHROPIC_VERSION ?? "2023-06-01";
@@ -533,12 +762,17 @@ async function runAnthropicRequest<T>(
   const maxAttempts = Math.max(1, Number(process.env.ANTHROPIC_MAX_RETRY_ATTEMPTS ?? "4"));
   const baseRetryMs = Math.max(500, Number(process.env.ANTHROPIC_RETRY_BASE_MS ?? "2000"));
   const inputTokens = estimateAnthropicInputTokens(payload);
+  const promptRedacted = sanitizePromptPayloadForTrace(payload);
+  const model = String(payload.model ?? process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6");
 
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     await reserveAnthropicInputBudget(inputTokens);
     const releaseSlot = await acquireAnthropicConcurrencySlot();
+    const startedAt = new Date().toISOString();
+    const startedAtMs = Date.now();
+    let recorded = false;
 
     try {
       const response = await fetch(responseUrl, {
@@ -554,6 +788,27 @@ async function runAnthropicRequest<T>(
 
       if (response.status === 429) {
         const body = await response.text();
+        const parsedBody = safeJsonParse(body) ?? body;
+        getActiveLlmObservabilityRecorder()?.recordRequest({
+          model,
+          section_name: metadata.sectionName,
+          tool_name: metadata.toolName,
+          request_id: getAnthropicRequestId(response.headers),
+          status: "rate_limited",
+          started_at: startedAt,
+          completed_at: new Date().toISOString(),
+          duration_ms: Date.now() - startedAtMs,
+          retry_count: attempt,
+          usage: createEmptyUsage(null),
+          prompt_redacted: promptRedacted,
+          response_redacted: sanitizeResponsePayloadForTrace(parsedBody),
+          error_message:
+            typeof parsedBody === "string"
+              ? parsedBody
+              : parsedBody?.error?.message ?? "Anthropic rate limit exceeded.",
+          schema_hash: metadata.schemaHash,
+        });
+        recorded = true;
         const retryAfterMs = parseRetryAfterMs(response.headers) ?? baseRetryMs * (attempt + 1);
         throw new AnthropicRateLimitError(
           `Anthropic request failed with 429: ${body || response.statusText}`,
@@ -563,11 +818,94 @@ async function runAnthropicRequest<T>(
 
       if (!response.ok) {
         const body = await response.text();
+        const parsedBody = safeJsonParse(body) ?? body;
+        getActiveLlmObservabilityRecorder()?.recordRequest({
+          model,
+          section_name: metadata.sectionName,
+          tool_name: metadata.toolName,
+          request_id: getAnthropicRequestId(response.headers),
+          status: "failed",
+          started_at: startedAt,
+          completed_at: new Date().toISOString(),
+          duration_ms: Date.now() - startedAtMs,
+          retry_count: attempt,
+          usage: createEmptyUsage(null),
+          prompt_redacted: promptRedacted,
+          response_redacted: sanitizeResponsePayloadForTrace(parsedBody),
+          error_message:
+            typeof parsedBody === "string"
+              ? parsedBody
+              : parsedBody?.error?.message ?? response.statusText,
+          schema_hash: metadata.schemaHash,
+        });
+        recorded = true;
         throw new Error(`Anthropic request failed with ${response.status}: ${body || response.statusText}`);
       }
 
-      return parseResponse(await response.json());
+      const json = await response.json();
+      const usage = getAnthropicUsagePayload(model, json);
+
+      try {
+        const parsed = parseResponse(json);
+        getActiveLlmObservabilityRecorder()?.recordRequest({
+          model,
+          section_name: metadata.sectionName,
+          tool_name: metadata.toolName,
+          request_id: getAnthropicRequestId(response.headers),
+          status: "succeeded",
+          started_at: startedAt,
+          completed_at: new Date().toISOString(),
+          duration_ms: Date.now() - startedAtMs,
+          stop_reason:
+            typeof json?.stop_reason === "string" ? json.stop_reason : undefined,
+          retry_count: attempt,
+          usage,
+          prompt_redacted: promptRedacted,
+          response_redacted: sanitizeResponsePayloadForTrace(json),
+          schema_hash: metadata.schemaHash,
+        });
+        recorded = true;
+        return parsed;
+      } catch (parseError) {
+        getActiveLlmObservabilityRecorder()?.recordRequest({
+          model,
+          section_name: metadata.sectionName,
+          tool_name: metadata.toolName,
+          request_id: getAnthropicRequestId(response.headers),
+          status: "failed",
+          started_at: startedAt,
+          completed_at: new Date().toISOString(),
+          duration_ms: Date.now() - startedAtMs,
+          stop_reason:
+            typeof json?.stop_reason === "string" ? json.stop_reason : undefined,
+          retry_count: attempt,
+          usage,
+          prompt_redacted: promptRedacted,
+          response_redacted: sanitizeResponsePayloadForTrace(json),
+          error_message:
+            parseError instanceof Error ? parseError.message : String(parseError),
+          schema_hash: metadata.schemaHash,
+        });
+        recorded = true;
+        throw parseError;
+      }
     } catch (error) {
+      if (!recorded) {
+        getActiveLlmObservabilityRecorder()?.recordRequest({
+          model,
+          section_name: metadata.sectionName,
+          tool_name: metadata.toolName,
+          status: error instanceof AnthropicRateLimitError ? "rate_limited" : "failed",
+          started_at: startedAt,
+          completed_at: new Date().toISOString(),
+          duration_ms: Date.now() - startedAtMs,
+          retry_count: attempt,
+          usage: createEmptyUsage(null),
+          prompt_redacted: promptRedacted,
+          error_message: error instanceof Error ? error.message : String(error),
+          schema_hash: metadata.schemaHash,
+        });
+      }
       lastError = error instanceof Error ? error : new Error(String(error));
       if (lastError instanceof AnthropicRateLimitError && attempt < maxAttempts - 1) {
         const jitterMs = Math.floor(Math.random() * 350);
@@ -613,11 +951,18 @@ async function mapWithConcurrency<T, R>(
 function resolveArchitectureSection(
   fragments: {
     core?: z.infer<typeof ArchitectureCoreUpdateSchema>;
+    bindings?: z.infer<typeof ArchitectureBindingsUpdateSchema>;
     topology?: z.infer<typeof ArchitectureTopologyUpdateSchema>;
     tradeoffs?: z.infer<typeof ArchitectureTradeoffsUpdateSchema>;
   },
   fallback: z.infer<typeof DraftArchitectureSchema>
 ) {
+  const mergedComponents = mergeArchitectureComponents(
+    fragments.core?.components ?? fallback.components,
+    fragments.bindings?.components ?? [],
+    fallback.components
+  );
+
   return DraftArchitectureSchema.parse({
     ...fallback,
     ...(fragments.core ?? {}),
@@ -625,13 +970,278 @@ function resolveArchitectureSection(
     ...(fragments.tradeoffs ?? {}),
     name: fragments.core?.name ?? fallback.name,
     description: fragments.core?.description ?? fallback.description,
-    components: fragments.core?.components ?? fallback.components,
+    components: mergedComponents,
     data_flows: fragments.topology?.data_flows ?? fallback.data_flows,
+    relationships: fragments.topology?.relationships ?? fallback.relationships,
     data_stores: fragments.topology?.data_stores ?? fallback.data_stores,
     async_patterns: fragments.topology?.async_patterns ?? fallback.async_patterns,
     api_surface: fragments.topology?.api_surface ?? fallback.api_surface,
     tradeoffs: fragments.tradeoffs?.tradeoffs ?? fallback.tradeoffs,
     rationale: fragments.tradeoffs?.rationale ?? fallback.rationale,
+  });
+}
+
+function inferDisplayRoleFromType(
+  component: Pick<z.infer<typeof DraftArchitectureComponentSchema>, "type">
+) {
+  switch (component.type) {
+    case "web":
+      return "presentation" as const;
+    case "api":
+    case "worker":
+      return "execution" as const;
+    case "db":
+    case "queue":
+    case "cache":
+    case "object_storage":
+      return "data" as const;
+    case "auth_provider":
+      return "identity" as const;
+    default:
+      return "integration" as const;
+  }
+}
+
+function inferComponentResponsibility(
+  component: Pick<z.infer<typeof DraftArchitectureComponentSchema>, "name" | "type">
+) {
+  switch (component.type) {
+    case "web":
+      return `Deliver ${component.name} user-facing presentation and client experience.`;
+    case "api":
+      return `Handle ${component.name} request orchestration and application logic.`;
+    case "worker":
+      return `Run ${component.name} background jobs and asynchronous execution.`;
+    case "db":
+      return `Persist core relational or document data for ${component.name}.`;
+    case "queue":
+      return `Buffer and sequence asynchronous work for ${component.name}.`;
+    case "cache":
+      return `Provide fast ephemeral reads or reservation state for ${component.name}.`;
+    case "object_storage":
+      return `Store static assets or durable object content for ${component.name}.`;
+    case "auth_provider":
+      return `Manage authentication and identity boundaries for ${component.name}.`;
+    default:
+      return `Integrate ${component.name} with external or supporting platform capabilities.`;
+  }
+}
+
+function inferPreferredProvider(provider?: string) {
+  if (!provider || provider === "none") {
+    return "generic" as const;
+  }
+
+  return provider as z.infer<typeof DraftDeploymentProviderSchema>;
+}
+
+function inferDeploymentTarget(
+  component: Pick<z.infer<typeof DraftArchitectureComponentSchema>, "type" | "display_role" | "name">
+) {
+  if (component.display_role === "build" || /build|compile|content source|mdx|json/i.test(component.name)) {
+    return "build_pipeline" as const;
+  }
+
+  switch (component.type) {
+    case "web":
+      return "edge_cdn" as const;
+    case "api":
+      return "app_server" as const;
+    case "worker":
+      return "serverless_function" as const;
+    case "db":
+      return "managed_database" as const;
+    case "queue":
+      return "queue_service" as const;
+    case "cache":
+      return "cache_service" as const;
+    case "object_storage":
+      return "static_host" as const;
+    case "auth_provider":
+      return "auth_service" as const;
+    default:
+      return "third_party_api" as const;
+  }
+}
+
+function inferRuntimeKind(
+  component: Pick<z.infer<typeof DraftArchitectureComponentSchema>, "type" | "display_role">,
+  target: z.infer<typeof DraftDeploymentTargetSchema>
+) {
+  if (target === "build_pipeline") {
+    return "none" as const;
+  }
+  if (target === "browser") {
+    return "browser_js" as const;
+  }
+  if (target === "edge_cdn" && component.type === "web") {
+    return "static_bundle" as const;
+  }
+  if (target === "serverless_function") {
+    return "worker_runtime" as const;
+  }
+  if (target === "app_server") {
+    return "node" as const;
+  }
+  if (
+    target === "managed_database" ||
+    target === "queue_service" ||
+    target === "cache_service" ||
+    target === "static_host" ||
+    target === "auth_service" ||
+    target === "observability_service"
+  ) {
+    return "managed" as const;
+  }
+
+  return "external" as const;
+}
+
+function inferServiceLabel(
+  component: Pick<z.infer<typeof DraftArchitectureComponentSchema>, "type">,
+  provider: z.infer<typeof DraftDeploymentProviderSchema>,
+  target: z.infer<typeof DraftDeploymentTargetSchema>
+) {
+  if (provider !== "aws") {
+    return undefined;
+  }
+
+  switch (component.type) {
+    case "web":
+      return target === "edge_cdn" ? "Amazon CloudFront" : "AWS Amplify Hosting";
+    case "api":
+      return "Amazon API Gateway";
+    case "worker":
+      return "AWS Lambda";
+    case "db":
+      return "Amazon DynamoDB";
+    case "queue":
+      return "Amazon SQS";
+    case "cache":
+      return "Amazon ElastiCache";
+    case "object_storage":
+      return "Amazon S3";
+    case "auth_provider":
+      return "Amazon Cognito";
+    default:
+      return "Amazon EventBridge";
+  }
+}
+
+function inferArtifactLabel(
+  component: Pick<z.infer<typeof DraftArchitectureComponentSchema>, "type" | "name" | "display_role">,
+  target: z.infer<typeof DraftDeploymentTargetSchema>
+) {
+  if (target === "build_pipeline") {
+    return /mdx|json|content/i.test(component.name)
+      ? "Local source content"
+      : "Build artifact";
+  }
+
+  if (component.type === "web" && target === "edge_cdn") {
+    return "Static presentation bundle";
+  }
+
+  if (component.type === "object_storage") {
+    return "Static asset bundle";
+  }
+
+  return undefined;
+}
+
+function inferRelationshipsFromDataFlows(
+  components: z.infer<typeof DraftArchitectureSchema>["components"],
+  dataFlows: string[]
+) {
+  const relationships: z.infer<typeof DraftArchitectureRelationshipSchema>[] = [];
+
+  for (const flow of dataFlows) {
+    const matched = components.filter((component) =>
+      normalizeText(flow).includes(normalizeText(component.name))
+    );
+
+    if (matched.length < 2) {
+      continue;
+    }
+
+    relationships.push({
+      from: matched[0].name,
+      to: matched[1].name,
+      kind: "request",
+      label: flow,
+    });
+  }
+
+  return limitArray(relationships, 12);
+}
+
+function mergeArchitectureComponents(
+  coreComponents: z.infer<typeof DraftArchitectureComponentCoreSchema>[],
+  bindingComponents: Array<{
+    name: string;
+    deployment?: z.infer<typeof DraftComponentDeploymentBindingSchema>;
+  }>,
+  fallbackComponents: z.infer<typeof DraftArchitectureSchema>["components"]
+) {
+  const bindingByName = new Map(
+    bindingComponents.map((component) => [component.name, component.deployment])
+  );
+  const fallbackByName = new Map(
+    fallbackComponents.map((component) => [component.name, component])
+  );
+
+  return coreComponents.map((component) => {
+    const fallback = fallbackByName.get(component.name);
+    const deployment = bindingByName.get(component.name) ?? fallback?.deployment;
+
+    return {
+      ...fallback,
+      ...component,
+      deployment,
+    };
+  });
+}
+
+function normalizeArchitectureOutput(
+  architecture: z.infer<typeof DraftArchitectureSchema>,
+  preferredProvider: string
+) {
+  const normalizedComponents = architecture.components.map((component) => {
+    const displayRole = component.display_role ?? inferDisplayRoleFromType(component);
+    const provider = inferPreferredProvider(component.deployment?.provider ?? preferredProvider);
+    const target =
+      component.deployment?.target ?? inferDeploymentTarget({ ...component, display_role: displayRole });
+    const runtime =
+      component.deployment?.runtime ??
+      inferRuntimeKind({ ...component, display_role: displayRole }, target);
+
+    return {
+      ...component,
+      responsibility: component.responsibility ?? inferComponentResponsibility(component),
+      display_role: displayRole,
+      deployment: {
+        provider,
+        target,
+        runtime,
+        service_label:
+          component.deployment?.service_label ??
+          inferServiceLabel(component, provider, target),
+        artifact_label:
+          component.deployment?.artifact_label ??
+          inferArtifactLabel({ ...component, display_role: displayRole }, target),
+      },
+    };
+  });
+
+  const relationships =
+    architecture.relationships.length > 0
+      ? architecture.relationships
+      : inferRelationshipsFromDataFlows(normalizedComponents, architecture.data_flows);
+
+  return DraftArchitectureSchema.parse({
+    ...architecture,
+    components: normalizedComponents,
+    relationships,
   });
 }
 
@@ -818,11 +1428,17 @@ function buildArchitecturePrompt(
   domain: z.infer<typeof DraftDomainSchema>
 ) {
   return [
-    'Return JSON with this exact shape: {"name":"...","description":"...","components":[{"name":"...","type":"api"}],"data_flows":["..."],"data_stores":["..."],"async_patterns":["..."],"api_surface":["..."],"tradeoffs":{"pros":["..."],"cons":["..."],"risks":["..."]},"rationale":"..."}',
+    'Return JSON with this exact shape: {"name":"...","description":"...","components":[{"name":"...","type":"api","responsibility":"...","display_role":"execution","deployment":{"provider":"vercel","target":"edge_cdn","runtime":"static_bundle","service_label":"optional","artifact_label":"optional"}}],"data_flows":["..."],"relationships":[{"from":"component-a","to":"component-b","kind":"request","label":"..."}],"data_stores":["..."],"async_patterns":["..."],"api_surface":["..."],"tradeoffs":{"pros":["..."],"cons":["..."],"risks":["..."]},"rationale":"..."}',
     "Generate exactly one architecture.",
     "Use component.type only from web, api, worker, db, queue, cache, object_storage, auth_provider, external_integration.",
+    "Use display_role only from presentation, build, execution, data, identity, integration, observability.",
+    "Use deployment.provider only from aws, gcp, azure, vercel, cloudflare, netlify, supabase, render, railway, generic, none, other.",
+    "Use deployment.target only from browser, edge_cdn, static_host, app_server, serverless_function, container_service, managed_database, object_storage, queue_service, cache_service, auth_service, third_party_api, build_pipeline, observability_service.",
+    "Use deployment.runtime only from static_bundle, browser_js, node, edge_runtime, worker_runtime, managed, external, none.",
     "Return 4 to 8 components.",
-    "Keep data_flows, data_stores, async_patterns, and api_surface to at most 6 items each.",
+    "Keep data_flows, relationships, data_stores, async_patterns, and api_surface to at most 6 items each.",
+    "Do not map the architecture to AWS if the context points to Vercel, Cloudflare, Netlify, Supabase, Render, Railway, or a generic static hosting model.",
+    "relationships.from and relationships.to must exactly match component names in the components array.",
     "Context:",
     compactJson({
       prd: core.prd,
@@ -978,15 +1594,38 @@ function buildRefinementDomainContext(input: RefineArchitecturePackInput) {
 
 function buildRefinementPlanningPrompt(input: RefineArchitecturePackInput) {
   return [
-    'Return JSON with this exact shape: {"clarifications":[{"id":"c1","question":"...","answer":"...","default_used":false,"why_it_matters":"..."}],"workflows":[{"id":"wf1","name":"...","steps":["..."]}],"requirements":[{"id":"req_1","text":"...","priority":"must","acceptance_criteria":["..."]}]}',
-    "Update only the clarification, workflow, and requirement context that should change because of the latest refinement conversation.",
-    "Return the full remaining clarifications array after applying the latest user answers.",
-    "If a clarification is now resolved, omit it from clarifications instead of keeping it as a defaulted item.",
-    "Preserve stable IDs for clarifications, workflows, and requirements where possible.",
+    'Return JSON with this exact shape: {"workflows":[{"id":"wf1","name":"...","steps":["..."]}],"requirements":[{"id":"req_1","text":"...","priority":"must","acceptance_criteria":["..."]}]}',
+    "Update only the workflow and requirement context that should change because of the latest refinement conversation.",
+    "Preserve stable IDs for workflows and requirements where possible.",
     "Return full arrays for the fields you include, not partial patches.",
     "Keep arrays short and concrete.",
     "Planning refinement context JSON:",
     compactJson(buildRefinementPlanningContext(input)),
+  ].join("\n");
+}
+
+function buildRefinementClarificationPrompt(input: RefineArchitecturePackInput) {
+  return [
+    'Return JSON with this exact shape: {"clarifications":[{"id":"c1","question":"...","answer":"...","default_used":true,"why_it_matters":"..."}]}',
+    "Update only the defaulted clarification assumptions that still remain unresolved after the latest refinement conversation.",
+    "Return the full remaining clarifications array after applying the latest user answers.",
+    "If a default assumption is now explicitly confirmed or replaced by the user, omit that clarification from the array.",
+    "Only include clarifications that still rely on a defaulted assumption.",
+    "Preserve stable clarification IDs where possible.",
+    "Clarification refinement context JSON:",
+    compactJson({
+      prd: {
+        title: input.currentPack.prd.title,
+        summary: input.currentPack.prd.summary,
+      },
+      latest_messages: input.messages.slice(-6),
+      clarifications: input.currentPack.clarifications.slice(0, 5),
+      open_questions: input.currentPack.open_questions.slice(0, 5),
+      architecture_summary: {
+        name: input.currentPack.architecture.name,
+        description: input.currentPack.architecture.description,
+      },
+    }),
   ].join("\n");
 }
 
@@ -1032,7 +1671,9 @@ function buildArchitectureAssistantReplyPrompt(input: RefineArchitecturePackInpu
     "Acknowledge the user's requested changes and answer any direct product questions from the latest context.",
     "Do not claim the architecture pack was already updated.",
     "Do not claim an open question is resolved unless the current pack context clearly resolves it.",
+    "Do not claim the architecture is clean or ready for decomposition if any clarification still has default_used=true.",
     "If the current pack still has open_questions, call them out as pending instead of inventing a final decision.",
+    "If the current pack still has defaulted clarifications, call those out as pending assumptions instead of saying the architecture is ready.",
     "If there is remaining ambiguity, say so clearly.",
     "Keep it concise but useful.",
     "Current refinement context JSON:",
@@ -1090,11 +1731,15 @@ function buildArchitectureRefinementContext(
       description: input.currentPack.architecture.description,
       components: input.currentPack.architecture.components.slice(0, 8),
       data_flows: input.currentPack.architecture.data_flows.slice(0, 6),
+      relationships: input.currentPack.architecture.relationships.slice(0, 8),
       data_stores: input.currentPack.architecture.data_stores.slice(0, 6),
       async_patterns: input.currentPack.architecture.async_patterns.slice(0, 6),
       api_surface: input.currentPack.architecture.api_surface.slice(0, 6),
       tradeoffs: input.currentPack.architecture.tradeoffs,
       rationale: input.currentPack.architecture.rationale,
+    },
+    org_constraints: {
+      cloud: input.currentPack.org_constraints.cloud,
     },
     updated_scope: {
       requirements: scopeUpdate.requirements.slice(0, 8).map((item) => ({
@@ -1130,10 +1775,35 @@ function buildArchitectureCoreRefinementPrompt(
   }
 ) {
   return [
-    'Return JSON with this exact shape: {"name":"...","description":"...","components":[{"name":"...","type":"api"}]}',
+    'Return JSON with this exact shape: {"name":"...","description":"...","components":[{"name":"...","type":"api","responsibility":"...","display_role":"execution"}]}',
     "Update only the architecture core: name, description, and components.",
     "Use component.type only from web, api, worker, db, queue, cache, object_storage, auth_provider, external_integration.",
+    "Use display_role only from presentation, build, execution, data, identity, integration, observability.",
     "Return 4 to 8 components.",
+    "Architecture refinement context JSON:",
+    compactJson(buildArchitectureRefinementContext(input, scopeUpdate)),
+  ].join("\n");
+}
+
+function buildArchitectureBindingsRefinementPrompt(
+  input: RefineArchitecturePackInput,
+  scopeUpdate: {
+    clarifications: z.infer<typeof DraftClarificationSchema>[];
+    workflows: z.infer<typeof DraftWorkflowSchema>[];
+    requirements: z.infer<typeof DraftRequirementSchema>[];
+    entities: z.infer<typeof DraftEntitySchema>[];
+    integrations: z.infer<typeof DraftIntegrationSchema>[];
+    nfrs: z.infer<typeof DraftNfrsSchema>;
+    assumptions: string[];
+    open_questions: string[];
+  }
+) {
+  return [
+    'Return JSON with this exact shape: {"components":[{"name":"...","deployment":{"provider":"vercel","target":"edge_cdn","runtime":"static_bundle","service_label":"optional","artifact_label":"optional"}}]}',
+    "Update only component deployment bindings.",
+    "Use deployment.provider only from aws, gcp, azure, vercel, cloudflare, netlify, supabase, render, railway, generic, none, other.",
+    "Use deployment.target only from browser, edge_cdn, static_host, app_server, serverless_function, container_service, managed_database, object_storage, queue_service, cache_service, auth_service, third_party_api, build_pipeline, observability_service.",
+    "Use deployment.runtime only from static_bundle, browser_js, node, edge_runtime, worker_runtime, managed, external, none.",
     "Architecture refinement context JSON:",
     compactJson(buildArchitectureRefinementContext(input, scopeUpdate)),
   ].join("\n");
@@ -1153,8 +1823,10 @@ function buildArchitectureTopologyRefinementPrompt(
   }
 ) {
   return [
-    'Return JSON with this exact shape: {"data_flows":["..."],"data_stores":["..."],"async_patterns":["..."],"api_surface":["..."]}',
-    "Update only architecture topology details: data flows, data stores, async patterns, and API surface.",
+    'Return JSON with this exact shape: {"data_flows":["..."],"relationships":[{"from":"component-a","to":"component-b","kind":"request","label":"..."}],"data_stores":["..."],"async_patterns":["..."],"api_surface":["..."]}',
+    "Update only architecture topology details: data flows, structured relationships, data stores, async patterns, and API surface.",
+    "Use relationship.kind only from request, serve, read, write, publish, consume, authenticate, observe, build, deploy.",
+    "relationships.from and relationships.to must exactly match component names in the current architecture context.",
     "Keep arrays short and concrete.",
     "Architecture refinement context JSON:",
     compactJson(buildArchitectureRefinementContext(input, scopeUpdate)),
@@ -1246,19 +1918,45 @@ function buildDecompositionPrompt(input: GenerateDecompositionPlanInput) {
         title: input.pack.prd.title,
         summary: input.pack.prd.summary,
       },
-      requirements: input.pack.requirements,
-      workflows: input.pack.workflows,
-      integrations: input.pack.integrations,
+      requirements: input.pack.requirements.slice(0, 8).map((item) => ({
+        id: item.id,
+        text: item.text,
+        priority: item.priority,
+      })),
+      workflows: input.pack.workflows.slice(0, 5).map((item) => ({
+        id: item.id,
+        name: item.name,
+        steps: item.steps.slice(0, 4),
+      })),
+      integrations: input.pack.integrations.slice(0, 6).map((item) => ({
+        name: item.name,
+        purpose: item.purpose,
+        direction: item.direction,
+        criticality: item.criticality,
+      })),
       architecture: {
         name: input.pack.architecture.name,
         description: input.pack.architecture.description,
-        components: input.pack.architecture.components,
-        data_stores: input.pack.architecture.data_stores,
-        async_patterns: input.pack.architecture.async_patterns,
-        api_surface: input.pack.architecture.api_surface,
+        components: input.pack.architecture.components.slice(0, 10).map((item) => ({
+          name: item.name,
+          type: item.type,
+          responsibility: item.responsibility,
+          display_role: item.display_role,
+          deployment: item.deployment
+            ? {
+                provider: item.deployment.provider,
+                target: item.deployment.target,
+                runtime: item.deployment.runtime,
+              }
+            : undefined,
+        })),
+        relationships: input.pack.architecture.relationships.slice(0, 10),
+        data_stores: input.pack.architecture.data_stores.slice(0, 6),
+        async_patterns: input.pack.architecture.async_patterns.slice(0, 6),
+        api_surface: input.pack.architecture.api_surface.slice(0, 6),
       },
       implementation_summary: input.pack.implementation.summary,
-      open_questions: input.pack.open_questions,
+      open_questions: input.pack.open_questions.slice(0, 4),
     }),
   ].join("\n");
 }
@@ -1425,15 +2123,12 @@ function buildNormalizedDesignGuidelinesPrompt(designGuidelinesText: string) {
 
 function buildDecompositionIteratorReviewPrompt(input: GenerateDecompositionIteratorReviewInput) {
   return [
-    'Return JSON with this exact shape: {"summary":"...","gaps":[{"id":"gap_1","type":"missing_coverage","severity":"medium","summary":"...","affected_requirement_ids":["req_1"],"affected_components":["pass-api"],"affected_work_item_ids":[],"auto_resolved":false,"resolution_notes":"optional"}],"questions":[{"prompt":"...","rationale":"...","related_requirement_ids":["req_1"],"related_components":["pass-api"]}],"proposed_work_items":[{"id":"draft_1","title":"...","summary":"...","category":"backend","size":"tiny","component":"pass-api","acceptance_criteria":["..."],"depends_on":[],"labels":["implementation","category:backend"]}]}',
     "You are the decomposition iterator review agent.",
     "Review whether the decomposition plan fully covers the project context and architecture.",
     "Exclude testing, QA, smoke, unit, integration, end-to-end, and CI work from decomposition.",
-    "If obvious implementation slices are missing, propose tiny or small work items to fill them.",
-    "If ambiguity prevents a safe amendment, ask clarifying questions instead of guessing.",
-    "Return unresolved gaps after considering any proposed_work_items in this same response.",
-    "Keep proposed_work_items small, implementation-focused, and component-scoped.",
-    "Do not propose more than 6 work items, 6 gaps, or 4 questions.",
+    "Only block when you can name the specific missing information needed to continue safely.",
+    "If the current architecture makes a missing implementation slice obvious, propose the work item instead of blocking.",
+    "Cite only compact evidence from the provided project context, architecture summary, and machine coverage snapshot.",
     "Review context JSON:",
     compactJson({
       iteration: input.iteration,
@@ -1444,21 +2139,37 @@ function buildDecompositionIteratorReviewPrompt(input: GenerateDecompositionIter
         architecture_summary: input.projectContext.architecture_summary,
         key_decisions: input.projectContext.key_decisions.slice(0, 8),
         refinement_decisions: input.projectContext.refinement_decisions.slice(-6),
-        coverage_targets: input.projectContext.coverage_targets.slice(0, 40),
-        unresolved_architecture_questions: input.projectContext.unresolved_architecture_questions,
+        coverage_targets: input.projectContext.coverage_targets.slice(0, 20),
+        unresolved_architecture_questions: input.projectContext.unresolved_architecture_questions.slice(0, 4),
       },
       architecture: {
         name: input.pack.architecture.name,
-        components: input.pack.architecture.components,
-        integrations: input.pack.integrations,
-        data_stores: input.pack.architecture.data_stores,
-        async_patterns: input.pack.architecture.async_patterns,
-        api_surface: input.pack.architecture.api_surface,
+        components: input.pack.architecture.components.slice(0, 10).map((item) => ({
+          name: item.name,
+          type: item.type,
+          responsibility: item.responsibility,
+          display_role: item.display_role,
+          deployment: item.deployment
+            ? {
+                provider: item.deployment.provider,
+                target: item.deployment.target,
+                runtime: item.deployment.runtime,
+              }
+            : undefined,
+        })),
+        integrations: input.pack.integrations.slice(0, 6).map((item) => ({
+          name: item.name,
+          purpose: item.purpose,
+          direction: item.direction,
+          criticality: item.criticality,
+        })),
+        data_stores: input.pack.architecture.data_stores.slice(0, 6),
+        async_patterns: input.pack.architecture.async_patterns.slice(0, 6),
+        api_surface: input.pack.architecture.api_surface.slice(0, 6),
       },
-      decomposition_plan: input.plan.work_items.slice(0, 80).map((item) => ({
+      decomposition_plan: input.plan.work_items.slice(0, 40).map((item) => ({
         id: item.id,
         title: item.title,
-        summary: item.summary,
         component: item.component,
         category: item.category,
         size: item.size,
@@ -1467,8 +2178,52 @@ function buildDecompositionIteratorReviewPrompt(input: GenerateDecompositionIter
       })),
       machine_snapshot: input.coverageSnapshot
         .filter((item) => item.status !== "covered")
-        .slice(0, 40),
+        .slice(0, 24),
     }),
+  ].join("\n");
+}
+
+function buildDecompositionIteratorMetaPrompt(input: GenerateDecompositionIteratorReviewInput) {
+  return [
+    'Return JSON with this exact shape: {"summary":"...","blocking_summary":"optional","claude_review_notes":["..."]}',
+    "Summarize the iterator result for this pass.",
+    "blocking_summary should be present only if the build is blocked.",
+    "claude_review_notes should be concise and implementation-focused.",
+    "Use at most 4 review notes.",
+    buildDecompositionIteratorReviewPrompt(input),
+  ].join("\n");
+}
+
+function buildDecompositionIteratorGapPrompt(input: GenerateDecompositionIteratorReviewInput) {
+  return [
+    'Return JSON with this exact shape: {"gaps":[{"id":"gap_1","type":"missing_coverage","severity":"medium","summary":"...","affected_requirement_ids":["req_1"],"affected_components":["pass-api"],"affected_work_item_ids":[],"auto_resolved":false,"why_blocked":"...","missing_information":["..."],"evidence":["..."],"recommended_inputs":[{"channel":"answer","label":"Answer here","prompt":"..."}],"expected_issue_outcomes":[{"title":"...","component":"pass-api","category":"backend","reason":"..."}],"resolution_notes":"optional"}]}',
+    "Return only unresolved gaps that remain after considering obvious amendments.",
+    "If there are no unresolved gaps, return an empty gaps array.",
+    "Do not return more than 6 gaps.",
+    "Every blocked gap must include concrete missing_information.",
+    buildDecompositionIteratorReviewPrompt(input),
+  ].join("\n");
+}
+
+function buildDecompositionIteratorQuestionPrompt(input: GenerateDecompositionIteratorReviewInput) {
+  return [
+    'Return JSON with this exact shape: {"questions":[{"prompt":"...","rationale":"...","related_requirement_ids":["req_1"],"related_components":["pass-api"],"derived_from_gap_ids":["gap_1"],"missing_information":["..."],"evidence":["..."],"recommended_inputs":[{"channel":"answer","label":"Answer here","prompt":"..."}],"expected_issue_outcomes":[{"title":"...","component":"pass-api","category":"backend","reason":"..."}]}]}',
+    "Return only clarifying questions needed to unblock decomposition.",
+    "If there are no blocking questions, return an empty questions array.",
+    "Do not return more than 4 questions.",
+    "Each question must explain what information is missing and what issues would be created once answered.",
+    buildDecompositionIteratorReviewPrompt(input),
+  ].join("\n");
+}
+
+function buildDecompositionIteratorWorkItemPrompt(input: GenerateDecompositionIteratorReviewInput) {
+  return [
+    'Return JSON with this exact shape: {"proposed_work_items":[{"id":"draft_1","title":"...","summary":"...","category":"backend","size":"tiny","component":"pass-api","acceptance_criteria":["..."],"depends_on":[],"labels":["implementation","category:backend"]}]}',
+    "Return only obvious implementation work items that can be added safely without clarification.",
+    "If there are no safe additions, return an empty proposed_work_items array.",
+    "Do not return more than 6 work items.",
+    "Keep work items tiny or small, implementation-focused, and component-scoped.",
+    buildDecompositionIteratorReviewPrompt(input),
   ].join("\n");
 }
 
@@ -1607,7 +2362,8 @@ function summarizeZodIssues(error: z.ZodError) {
 async function callAnthropic(
   systemPrompt: string,
   messages: AnthropicMessage[],
-  maxTokens: number
+  maxTokens: number,
+  sectionName = "Anthropic completion"
 ) {
   const model = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
   const temperature = Number(process.env.ANTHROPIC_TEMPERATURE ?? "0");
@@ -1619,7 +2375,8 @@ async function callAnthropic(
       system: systemPrompt,
       messages,
     },
-    extractText
+    extractText,
+    { sectionName }
   );
 }
 
@@ -1651,10 +2408,13 @@ async function callAnthropicStructuredTool<T extends z.ZodTypeAny>(
   description: string,
   systemPrompt: string,
   prompt: string,
-  maxTokens: number
+  maxTokens: number,
+  sectionName = toolName
 ): Promise<z.infer<T>> {
   const model = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
   const temperature = Number(process.env.ANTHROPIC_TEMPERATURE ?? "0");
+  const inputSchema = z.toJSONSchema(schema);
+  const schemaHash = createHash("sha256").update(JSON.stringify(inputSchema)).digest("hex");
   return runAnthropicRequest(
     {
       model,
@@ -1665,21 +2425,23 @@ async function callAnthropicStructuredTool<T extends z.ZodTypeAny>(
         {
           name: toolName,
           description,
-          input_schema: z.toJSONSchema(schema),
+          input_schema: inputSchema,
           strict: true,
         },
       ],
       tool_choice: { type: "tool", name: toolName },
       messages: [{ role: "user", content: prompt }],
     },
-    (response) => schema.parse(extractToolUseInput(response, toolName))
+    (response) => schema.parse(extractToolUseInput(response, toolName)),
+    { sectionName, toolName, schemaHash }
   );
 }
 
 async function callAnthropicChunked(
   systemPrompt: string,
   prompt: string,
-  maxTokens: number
+  maxTokens: number,
+  sectionName: string
 ) {
   const maxSegments = Number(process.env.ANTHROPIC_MAX_CONTINUATION_SEGMENTS ?? "8");
   const messages: AnthropicMessage[] = [{ role: "user", content: prompt }];
@@ -1687,7 +2449,12 @@ async function callAnthropicChunked(
   let lastStopReason: string | null = null;
 
   for (let segment = 0; segment < maxSegments; segment += 1) {
-    const completion = await callAnthropic(systemPrompt, messages, maxTokens);
+    const completion = await callAnthropic(
+      systemPrompt,
+      messages,
+      maxTokens,
+      segment === 0 ? sectionName : `${sectionName} continuation ${segment + 1}`
+    );
     combinedText = `${combinedText}${combinedText ? "\n" : ""}${completion.text}`.trim();
     lastStopReason = completion.stopReason;
 
@@ -1731,7 +2498,12 @@ async function generateSection<T extends z.ZodTypeAny>(
 
   for (let attempt = 0; attempt < 4; attempt += 1) {
     try {
-      const completion = await callAnthropicChunked(systemPrompt, currentPrompt, maxTokens);
+      const completion = await callAnthropicChunked(
+        systemPrompt,
+        currentPrompt,
+        maxTokens,
+        sectionName
+      );
       candidateText = completion.text;
 
       try {
@@ -1812,7 +2584,8 @@ async function generateStructuredSection<T extends z.ZodTypeAny>(args: {
         args.toolDescription,
         args.systemPrompt,
         attempt.prompt,
-        attempt.maxTokens
+        attempt.maxTokens,
+        args.sectionName
       );
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
@@ -2115,7 +2888,7 @@ function detailTargetCount(
 async function generateFallbackBaseTasks(pack: ArchitecturePack) {
   const componentPlans = await mapWithConcurrency(
     pack.architecture.components,
-    getAnthropicBatchConcurrency(),
+    1,
     (component) =>
       callAnthropicStructuredTool(
         DecompositionBaseTaskPlanSchema,
@@ -2552,6 +3325,7 @@ function finalizePack(
       ...architecture,
       components: limitArray(architecture.components, 8),
       data_flows: limitArray(uniqueStrings(architecture.data_flows), 6),
+      relationships: limitArray(architecture.relationships, 10),
       data_stores: limitArray(uniqueStrings(architecture.data_stores), 6),
       async_patterns: limitArray(uniqueStrings(architecture.async_patterns), 6),
       api_surface: limitArray(uniqueStrings(architecture.api_surface), 6),
@@ -2683,6 +3457,7 @@ export async function generateArchitecturePack(
   input: GenerateArchitecturePackInput
 ): Promise<ArchitecturePack> {
   const createdAt = new Date().toISOString();
+  const preferredProvider = inferPreferredProvider(input.orgConstraints.cloud.provider);
 
   const core = await generateStructuredSection({
     schema: DraftPrdCoreSchema,
@@ -2743,7 +3518,7 @@ export async function generateArchitecturePack(
     maxTokens: Number(process.env.ANTHROPIC_DOMAIN_MAX_TOKENS ?? "650"),
   });
 
-  const architecture = await generateStructuredSection({
+  const rawArchitecture = await generateStructuredSection({
     schema: DraftArchitectureSchema,
     toolName: "generate_architecture",
     toolDescription: "Generate one concrete architecture for the PASS planning pack.",
@@ -2760,6 +3535,7 @@ export async function generateArchitecturePack(
     ),
     maxTokens: Number(process.env.ANTHROPIC_ARCHITECTURE_MAX_TOKENS ?? "750"),
   });
+  const architecture = normalizeArchitectureOutput(rawArchitecture, preferredProvider);
 
   const refinement = await generateStructuredSection({
     schema: DraftRefinementSchema,
@@ -2843,14 +3619,30 @@ export async function generateArchitecturePack(
 export async function refineArchitecturePack(
   input: RefineArchitecturePackInput
 ): Promise<{ updatedPack: ArchitecturePack; assistantResponse: string }> {
+  const preferredProvider = inferPreferredProvider(
+    input.currentPack.org_constraints.cloud.provider
+  );
+  const clarificationUpdate = await generateStructuredSection({
+    schema: RefinementClarificationUpdateSchema,
+    toolName: "refine_clarification_scope",
+    toolDescription:
+      "Update the remaining defaulted clarifications for the refined architecture pack.",
+    sectionName: "Refinement clarification update",
+    systemPrompt: buildSectionSystemPrompt("refinement clarification update", [
+      "Return only the remaining unresolved defaulted clarifications.",
+      "Omit any clarification the user has now answered explicitly.",
+    ]),
+    prompt: buildRefinementClarificationPrompt(input),
+    maxTokens: Number(process.env.ANTHROPIC_ARCHITECTURE_CLARIFICATION_MAX_TOKENS ?? "350"),
+  });
   const planningUpdate = await generateStructuredSection({
     schema: RefinementPlanningUpdateSchema,
     toolName: "refine_planning_scope",
     toolDescription:
-      "Update clarification, workflow, and requirement scope for the refined architecture pack.",
+      "Update workflow and requirement scope for the refined architecture pack.",
     sectionName: "Refinement planning update",
     systemPrompt: buildSectionSystemPrompt("refinement planning update", [
-      "Return only the updated clarification, workflow, and requirement scope.",
+      "Return only the updated workflow and requirement scope.",
       "Preserve stable IDs where possible.",
     ]),
     prompt: buildRefinementPlanningPrompt(input),
@@ -2893,7 +3685,9 @@ export async function refineArchitecturePack(
     maxTokens: Number(process.env.ANTHROPIC_ARCHITECTURE_DOMAIN_DECISION_MAX_TOKENS ?? "350"),
   });
 
-  const mergedClarifications = normalizeClarifications(planningUpdate.clarifications);
+  const mergedClarifications = normalizeClarifications(
+    clarificationUpdate.clarifications
+  ).filter((item) => item.default_used);
   const mergedWorkflows = preferNonEmpty(
     normalizeWorkflows(planningUpdate.workflows),
     input.currentPack.workflows
@@ -2952,6 +3746,19 @@ export async function refineArchitecturePack(
     prompt: buildArchitectureCoreRefinementPrompt(input, mergedScopeContext),
     maxTokens: Number(process.env.ANTHROPIC_ARCHITECTURE_CORE_MAX_TOKENS ?? "450"),
   });
+  const architectureBindingsUpdate = await generateStructuredSection({
+    schema: ArchitectureBindingsUpdateSchema,
+    toolName: "refine_architecture_bindings",
+    toolDescription:
+      "Return the revised component deployment bindings for the architecture.",
+    sectionName: "Refined architecture bindings",
+    systemPrompt: buildSectionSystemPrompt("refined architecture bindings", [
+      "Return only the revised deployment bindings.",
+      "Keep component names aligned with the architecture core.",
+    ]),
+    prompt: buildArchitectureBindingsRefinementPrompt(input, mergedScopeContext),
+    maxTokens: Number(process.env.ANTHROPIC_ARCHITECTURE_BINDINGS_MAX_TOKENS ?? "400"),
+  });
   const architectureTopologyUpdate = await generateStructuredSection({
     schema: ArchitectureTopologyUpdateSchema,
     toolName: "refine_architecture_topology",
@@ -2979,10 +3786,15 @@ export async function refineArchitecturePack(
   const updatedArchitecture = resolveArchitectureSection(
     {
       core: architectureCoreUpdate,
+      bindings: architectureBindingsUpdate,
       topology: architectureTopologyUpdate,
       tradeoffs: architectureTradeoffsUpdate,
     },
-    input.currentPack.architecture
+    normalizeArchitectureOutput(input.currentPack.architecture, preferredProvider)
+  );
+  const normalizedUpdatedArchitecture = normalizeArchitectureOutput(
+    updatedArchitecture,
+    preferredProvider
   );
 
   const refinementSection = await generateStructuredSection({
@@ -2995,7 +3807,7 @@ export async function refineArchitecturePack(
     ]),
     prompt: buildRefinementGuidanceUpdatePrompt(
       mergedRequirements,
-      updatedArchitecture,
+      normalizedUpdatedArchitecture,
       input.messages
     ),
     maxTokens: Number(process.env.ANTHROPIC_REFINEMENT_GUIDANCE_MAX_TOKENS ?? "350"),
@@ -3006,7 +3818,7 @@ export async function refineArchitecturePack(
   );
 
   const implementationOverview = deriveImplementationOverviewFromArchitecture(
-    updatedArchitecture,
+    normalizedUpdatedArchitecture,
     updatedRefinement,
     {
       summary: input.currentPack.implementation.summary,
@@ -3017,7 +3829,10 @@ export async function refineArchitecturePack(
     mergedOpenQuestions
   );
 
-  const derivedLogicRequirements = deriveLogicRequirements(mergedRequirements, updatedArchitecture);
+  const derivedLogicRequirements = deriveLogicRequirements(
+    mergedRequirements,
+    normalizedUpdatedArchitecture
+  );
   const derivedIssuePlan = deriveIssuePlan(derivedLogicRequirements, implementationOverview);
   const normalizedRequirements = mergedRequirements.map((item) => ({
     id: item.id,
@@ -3042,7 +3857,7 @@ export async function refineArchitecturePack(
     ]),
     prompt: buildCoverageTraceRefinementPrompt(
       normalizedRequirements,
-      updatedArchitecture,
+      normalizedUpdatedArchitecture,
       normalizedLogicRequirements,
       normalizedIssuePlan,
       input.messages
@@ -3066,16 +3881,17 @@ export async function refineArchitecturePack(
     integrations: mergedIntegrations,
     nfrs: mergedNfrs,
     architecture: {
-      ...updatedArchitecture,
-      components: limitArray(updatedArchitecture.components, 8),
-      data_flows: limitArray(uniqueStrings(updatedArchitecture.data_flows), 6),
-      data_stores: limitArray(uniqueStrings(updatedArchitecture.data_stores), 6),
-      async_patterns: limitArray(uniqueStrings(updatedArchitecture.async_patterns), 6),
-      api_surface: limitArray(uniqueStrings(updatedArchitecture.api_surface), 6),
+      ...normalizedUpdatedArchitecture,
+      components: limitArray(normalizedUpdatedArchitecture.components, 8),
+      data_flows: limitArray(uniqueStrings(normalizedUpdatedArchitecture.data_flows), 6),
+      relationships: limitArray(normalizedUpdatedArchitecture.relationships, 10),
+      data_stores: limitArray(uniqueStrings(normalizedUpdatedArchitecture.data_stores), 6),
+      async_patterns: limitArray(uniqueStrings(normalizedUpdatedArchitecture.async_patterns), 6),
+      api_surface: limitArray(uniqueStrings(normalizedUpdatedArchitecture.api_surface), 6),
       tradeoffs: {
-        pros: limitArray(uniqueStrings(updatedArchitecture.tradeoffs.pros), 5),
-        cons: limitArray(uniqueStrings(updatedArchitecture.tradeoffs.cons), 5),
-        risks: limitArray(uniqueStrings(updatedArchitecture.tradeoffs.risks), 5),
+        pros: limitArray(uniqueStrings(normalizedUpdatedArchitecture.tradeoffs.pros), 5),
+        cons: limitArray(uniqueStrings(normalizedUpdatedArchitecture.tradeoffs.cons), 5),
+        risks: limitArray(uniqueStrings(normalizedUpdatedArchitecture.tradeoffs.risks), 5),
       },
     },
     refinement: updatedRefinement,
@@ -3140,19 +3956,37 @@ export async function generateDecompositionPlan(
   input: GenerateDecompositionPlanInput
 ): Promise<DecompositionPlan> {
   const targetCount = Number(process.env.PASS_DECOMPOSITION_TARGET_COUNT ?? "36");
-  const baseTaskPlan = await callAnthropicStructuredTool(
-    DecompositionBaseTaskPlanSchema,
-    "generate_decomposition_base_tasks",
-    "Create the parent/base implementation tasks for a project decomposition plan.",
-    buildSectionSystemPrompt("decomposition base task plan", [
-      "Return only parent implementation tasks.",
-      "Do not generate testing work.",
-    ]),
-    buildDecompositionPrompt(input),
-    Number(process.env.ANTHROPIC_DECOMPOSITION_BASE_MAX_TOKENS ?? "900")
-  );
-  const primaryBaseTasks =
-    baseTaskPlan.base_tasks.length > 0 ? baseTaskPlan.base_tasks : await generateFallbackBaseTasks(input.pack);
+  let primaryBaseTasks: z.infer<typeof DecompositionBaseTaskSchema>[];
+  try {
+    const baseTaskPlan = await callAnthropicStructuredTool(
+      DecompositionBaseTaskPlanSchema,
+      "generate_decomposition_base_tasks",
+      "Create the parent/base implementation tasks for a project decomposition plan.",
+      buildSectionSystemPrompt("decomposition base task plan", [
+        "Return only parent implementation tasks.",
+        "Do not generate testing work.",
+      ]),
+      buildDecompositionPrompt(input),
+      Number(process.env.ANTHROPIC_DECOMPOSITION_BASE_MAX_TOKENS ?? "900")
+    );
+    primaryBaseTasks =
+      baseTaskPlan.base_tasks.length > 0
+        ? baseTaskPlan.base_tasks
+        : await generateFallbackBaseTasks(input.pack);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const canFallbackToChunkedBaseTasks =
+      message.includes("timeout") ||
+      message.includes("aborted") ||
+      message.includes("rate limit") ||
+      message.includes("429");
+
+    if (!canFallbackToChunkedBaseTasks) {
+      throw error;
+    }
+
+    primaryBaseTasks = await generateFallbackBaseTasks(input.pack);
+  }
   const baseTasks = normalizeBaseDecompositionTasks(input.pack, primaryBaseTasks);
 
   if (baseTasks.length === 0) {
@@ -3260,15 +4094,51 @@ export async function generateDecompositionPlan(
 export async function generateDecompositionIteratorReview(
   input: GenerateDecompositionIteratorReviewInput
 ) {
-  return callAnthropicStructuredTool(
-    DecompositionIteratorReviewSchema,
-    "review_decomposition_iterator",
-    "Review decomposition coverage, propose missing implementation work items, and open clarifying questions when needed.",
-    buildSectionSystemPrompt("decomposition iterator review", [
-      "Return only decomposition review findings.",
-      "Do not generate testing work.",
-    ]),
-    buildDecompositionIteratorReviewPrompt(input),
-    Number(process.env.ANTHROPIC_DECOMPOSITION_REVIEW_MAX_TOKENS ?? "900")
+  const maxTokens = Number(process.env.ANTHROPIC_DECOMPOSITION_REVIEW_MAX_TOKENS ?? "900");
+  const systemPrompt = buildSectionSystemPrompt("decomposition iterator review", [
+    "Return only decomposition review findings.",
+    "Do not generate testing work.",
+  ]);
+
+  const meta = await callAnthropicStructuredTool(
+    DecompositionIteratorMetaSchema,
+    "review_decomposition_iterator_meta",
+    "Summarize iterator build-readiness review results and Claude notes.",
+    systemPrompt,
+    buildDecompositionIteratorMetaPrompt(input),
+    Math.min(maxTokens, Number(process.env.ANTHROPIC_DECOMPOSITION_REVIEW_META_MAX_TOKENS ?? "420"))
   );
+  const gaps = await callAnthropicStructuredTool(
+    DecompositionIteratorGapBatchSchema,
+    "review_decomposition_iterator_gaps",
+    "Return enriched blocking gaps for decomposition coverage review.",
+    systemPrompt,
+    buildDecompositionIteratorGapPrompt(input),
+    Math.min(maxTokens, Number(process.env.ANTHROPIC_DECOMPOSITION_REVIEW_GAPS_MAX_TOKENS ?? "650"))
+  );
+  const questions = await callAnthropicStructuredTool(
+    DecompositionIteratorQuestionBatchSchema,
+    "review_decomposition_iterator_questions",
+    "Return enriched clarifying questions for decomposition coverage review.",
+    systemPrompt,
+    buildDecompositionIteratorQuestionPrompt(input),
+    Math.min(maxTokens, Number(process.env.ANTHROPIC_DECOMPOSITION_REVIEW_QUESTIONS_MAX_TOKENS ?? "600"))
+  );
+  const proposedWorkItems = await callAnthropicStructuredTool(
+    DecompositionIteratorWorkItemBatchSchema,
+    "review_decomposition_iterator_work_items",
+    "Return safe implementation work items that can be auto-added during iterator review.",
+    systemPrompt,
+    buildDecompositionIteratorWorkItemPrompt(input),
+    Math.min(maxTokens, Number(process.env.ANTHROPIC_DECOMPOSITION_REVIEW_WORK_ITEMS_MAX_TOKENS ?? "700"))
+  );
+
+  return {
+    summary: meta.summary,
+    blocking_summary: meta.blocking_summary,
+    claude_review_notes: meta.claude_review_notes,
+    gaps: gaps.gaps,
+    questions: questions.questions,
+    proposed_work_items: proposedWorkItems.proposed_work_items,
+  };
 }

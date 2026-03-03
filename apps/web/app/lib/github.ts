@@ -1,5 +1,5 @@
 import "server-only";
-import { readServerEnv } from "./env";
+import { resolveIntegrationToken } from "./integrationTokens";
 
 export type GitHubRepository = {
   id: number;
@@ -9,11 +9,12 @@ export type GitHubRepository = {
 };
 
 export async function listAccessibleRepositories(): Promise<GitHubRepository[]> {
-  const token =
-    process.env.PASS_GITHUB_WORKFLOW_TOKEN ??
-    process.env.GITHUB_WORKFLOW_TOKEN ??
-    process.env.PASS_GITHUB_TOKEN ??
-    process.env.GITHUB_TOKEN;
+  const token = await resolveIntegrationToken("github", [
+    "PASS_GITHUB_WORKFLOW_TOKEN",
+    "GITHUB_WORKFLOW_TOKEN",
+    "PASS_GITHUB_TOKEN",
+    "GITHUB_TOKEN",
+  ]);
 
   if (!token) {
     return [];

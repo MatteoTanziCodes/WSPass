@@ -2,6 +2,9 @@ import "server-only";
 import {
   ArchitectureChatStateSchema,
   ArchitecturePackSchema,
+  BuildOrchestrationStateSchema,
+  IssueContextQuestionSchema,
+  IssueExecutionStateSchema,
   DecompositionPlanSchema,
   DecompositionReviewArtifactSchema,
   DecompositionReviewQuestionAnswerRequestSchema,
@@ -9,8 +12,12 @@ import {
   DecompositionStateSchema,
   ImplementationIssueStateCollectionSchema,
   PlannerRunInputSchema,
+  ProjectBuildConfigSchema,
+  ProjectObservabilityBudgetSchema,
+  ProjectObservabilitySummarySchema,
   RepoStateSchema,
   RunExecutionSchema,
+  ProjectSecretRequirementSchema,
 } from "@pass/shared";
 import { z } from "zod";
 import { readServerEnv } from "./env";
@@ -38,6 +45,7 @@ const RunListItemSchema = z.object({
   repo_state: RepoStateSchema.optional(),
   decomposition_state: DecompositionStateSchema.optional(),
   decomposition_review_state: DecompositionReviewStateSchema.optional(),
+  build_state: BuildOrchestrationStateSchema.optional(),
 });
 
 const RunListSchema = z.object({
@@ -59,6 +67,7 @@ const RunResourceSchema = z.object({
   decomposition_state: DecompositionStateSchema.optional(),
   decomposition_review_state: DecompositionReviewStateSchema.optional(),
   implementation_state: ImplementationIssueStateCollectionSchema.optional(),
+  build_state: BuildOrchestrationStateSchema.optional(),
 });
 
 const RunDetailSchema = z.object({
@@ -81,6 +90,16 @@ const ArtifactResponseSchema = z.object({
     created_at: z.string().datetime(),
   }),
   payload: z.unknown(),
+});
+
+const RunLogListSchema = z.object({
+  logs: z.array(
+    z.object({
+      name: z.string().min(1),
+      size_bytes: z.number().int().nonnegative(),
+      updated_at: z.string().datetime(),
+    })
+  ),
 });
 
 function getBaseUrl() {
@@ -161,6 +180,105 @@ export async function getDecompositionReview(runId: string) {
   return DecompositionReviewArtifactSchema.parse(artifact.payload);
 }
 
+export async function getArtifact(runId: string, artifactName: string) {
+  const response = await fetch(`${getBaseUrl()}/runs/${runId}/artifacts/${artifactName}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    return null;
+  }
+
+  return ArtifactResponseSchema.parse(await response.json());
+}
+
+export async function listRunLogs(runId: string) {
+  const response = await fetch(`${getBaseUrl()}/runs/${runId}/logs`, {
+    cache: "no-store",
+    headers: getAuthHeaders(),
+  });
+
+  if (!response.ok) {
+    if (response.status === 404) {
+      return [];
+    }
+    const text = await response.text();
+    throw new Error(`Failed to list run logs: ${response.status} ${text}`);
+  }
+
+  return RunLogListSchema.parse(await response.json()).logs;
+}
+
+export async function getRunLog(runId: string, logName: string) {
+  const response = await fetch(`${getBaseUrl()}/runs/${runId}/logs/${encodeURIComponent(logName)}`, {
+    cache: "no-store",
+    headers: getAuthHeaders(),
+  });
+
+  if (!response.ok) {
+    if (response.status === 404) {
+      return null;
+    }
+    const text = await response.text();
+    throw new Error(`Failed to fetch run log: ${response.status} ${text}`);
+  }
+
+  return response.text();
+}
+
+export async function getProjectObservability(projectKey: string) {
+  const response = await fetch(
+    `${getBaseUrl()}/project-observability?project_key=${encodeURIComponent(projectKey)}`,
+    {
+      cache: "no-store",
+      headers: getAuthHeaders(),
+    }
+  );
+
+  if (!response.ok) {
+    if (response.status === 404) {
+      return null;
+    }
+    const text = await response.text();
+    throw new Error(`Failed to fetch project observability: ${response.status} ${text}`);
+  }
+
+  return ProjectObservabilitySummarySchema.parse(await response.json());
+}
+
+export async function updateProjectObservabilityBudget(
+  projectKey: string,
+  payload: {
+    warning_usd: number | null;
+    critical_usd: number | null;
+  }
+) {
+  const response = await fetch(
+    `${getBaseUrl()}/project-observability/config?project_key=${encodeURIComponent(projectKey)}`,
+    {
+      method: "PATCH",
+      headers: getJsonAuthHeaders(),
+      body: JSON.stringify(payload),
+    }
+  );
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to update project observability budget: ${response.status} ${text}`);
+  }
+
+  const parsed = z
+    .object({
+      budget: ProjectObservabilityBudgetSchema,
+    })
+    .parse(await response.json());
+
+  return parsed.budget;
+}
+
+export function getProjectObservabilityExportPath(projectKey: string) {
+  return `/api/project-observability/export?project_key=${encodeURIComponent(projectKey)}`;
+}
+
 export async function createRun(
   input: z.infer<typeof PlannerRunInputSchema>
 ): Promise<z.infer<typeof RunResourceSchema>> {
@@ -190,10 +308,15 @@ export async function dispatchWorkflow(
     | "phase2-decomposition"
     | "phase2-decomposition-iterator"
     | "phase2-implementation"
+    | "phase3-build-orchestrator"
+    | "phase3-issue-execution"
+    | "phase3-pr-supervisor",
+  options?: { issueId?: string }
 ) {
   const response = await fetch(`${getBaseUrl()}/runs/${runId}/dispatch/${workflowName}`, {
     method: "POST",
-    headers: getAuthHeaders(),
+    headers: options?.issueId ? getJsonAuthHeaders() : getAuthHeaders(),
+    body: options?.issueId ? JSON.stringify({ issue_id: options.issueId }) : undefined,
   });
 
   if (!response.ok) {
@@ -203,6 +326,168 @@ export async function dispatchWorkflow(
       response.status,
       text
     );
+  }
+}
+
+export async function updateIssueExecutionState(
+  runId: string,
+  issueId: string,
+  payload: z.infer<typeof IssueExecutionStateSchema>
+) {
+  const response = await fetch(`${getBaseUrl()}/runs/${runId}/issues/${issueId}/state`, {
+    method: "PATCH",
+    headers: getJsonAuthHeaders(),
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to update issue execution state: ${response.status} ${text}`);
+  }
+}
+
+export async function updateIssueRequirements(
+  runId: string,
+  issueId: string,
+  requirements: Array<Pick<z.infer<typeof ProjectSecretRequirementSchema>, "id" | "status" | "resolved_at">>
+) {
+  const response = await fetch(`${getBaseUrl()}/runs/${runId}/issues/${issueId}/requirements`, {
+    method: "PATCH",
+    headers: getJsonAuthHeaders(),
+    body: JSON.stringify({ requirements }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to update issue requirements: ${response.status} ${text}`);
+  }
+}
+
+export async function updateIssueContextQuestions(
+  runId: string,
+  issueId: string,
+  questions: Array<
+    Pick<
+      z.infer<typeof IssueContextQuestionSchema>,
+      "id" | "status" | "answer" | "answered_at"
+    >
+  >
+) {
+  const response = await fetch(`${getBaseUrl()}/runs/${runId}/issues/${issueId}/context-questions`, {
+    method: "PATCH",
+    headers: getJsonAuthHeaders(),
+    body: JSON.stringify({ questions }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to update issue context questions: ${response.status} ${text}`);
+  }
+}
+
+const ProjectSecretMetadataSchema = z.object({
+  name: z.string().min(1),
+  kind: z.enum(["integration", "project_secret", "project_variable"]),
+  provider: z.enum(["github", "anthropic", "stripe", "sentry", "other"]).optional(),
+  updated_at: z.string().datetime(),
+  hint: z.string().min(1).optional(),
+});
+
+export async function getProjectBuildConfig(projectKey: string) {
+  const response = await fetch(
+    `${getBaseUrl()}/project-build/config?project_key=${encodeURIComponent(projectKey)}`,
+    {
+      cache: "no-store",
+      headers: getAuthHeaders(),
+    }
+  );
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to fetch project build config: ${response.status} ${text}`);
+  }
+
+  return z.object({ config: ProjectBuildConfigSchema }).parse(await response.json()).config;
+}
+
+export async function updateProjectBuildConfig(
+  projectKey: string,
+  payload: {
+    quality_commands?: Partial<z.infer<typeof ProjectBuildConfigSchema>["quality_commands"]>;
+    warning_defaults?: string[];
+    critical_defaults?: string[];
+  }
+) {
+  const response = await fetch(
+    `${getBaseUrl()}/project-build/config?project_key=${encodeURIComponent(projectKey)}`,
+    {
+      method: "PATCH",
+      headers: getJsonAuthHeaders(),
+      body: JSON.stringify(payload),
+    }
+  );
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to update project build config: ${response.status} ${text}`);
+  }
+
+  return z.object({ config: ProjectBuildConfigSchema }).parse(await response.json()).config;
+}
+
+export async function listProjectBuildSecrets(projectKey: string) {
+  const response = await fetch(
+    `${getBaseUrl()}/project-build/secrets?project_key=${encodeURIComponent(projectKey)}`,
+    {
+      cache: "no-store",
+      headers: getAuthHeaders(),
+    }
+  );
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to list project build secrets: ${response.status} ${text}`);
+  }
+
+  return z.object({ secrets: z.array(ProjectSecretMetadataSchema) }).parse(await response.json()).secrets;
+}
+
+export async function putProjectBuildSecret(
+  projectKey: string,
+  payload: {
+    name: string;
+    value: string;
+    kind: "integration" | "project_secret" | "project_variable";
+    provider?: "github" | "anthropic" | "stripe" | "sentry" | "other";
+  }
+) {
+  const response = await fetch(
+    `${getBaseUrl()}/project-build/secrets?project_key=${encodeURIComponent(projectKey)}`,
+    {
+      method: "PUT",
+      headers: getJsonAuthHeaders(),
+      body: JSON.stringify(payload),
+    }
+  );
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to save project build secret: ${response.status} ${text}`);
+  }
+}
+
+export async function deleteProjectBuildSecret(projectKey: string, name: string) {
+  const response = await fetch(
+    `${getBaseUrl()}/project-build/secrets?project_key=${encodeURIComponent(projectKey)}&name=${encodeURIComponent(name)}`,
+    {
+      method: "DELETE",
+      headers: getAuthHeaders(),
+    }
+  );
+
+  if (!response.ok && response.status !== 204) {
+    const text = await response.text();
+    throw new Error(`Failed to delete project build secret: ${response.status} ${text}`);
   }
 }
 

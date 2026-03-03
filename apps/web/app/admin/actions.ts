@@ -6,18 +6,18 @@ function apiBase() {
   return readServerEnv("PASS_API_BASE_URL").replace(/\/+$/, "");
 }
 
-function authHeaders() {
+function authHeaders(withJsonBody = false) {
   return {
     Accept: "application/json",
     Authorization: `Bearer ${readServerEnv("PASS_API_TOKEN")}`,
-    "Content-Type": "application/json",
+    ...(withJsonBody ? { "Content-Type": "application/json" } : {}),
   };
 }
 
 export async function connectIntegration(provider: string, token: string) {
   const res = await fetch(`${apiBase()}/admin/integrations/${provider}`, {
     method: "PUT",
-    headers: authHeaders(),
+    headers: authHeaders(true),
     body: JSON.stringify({ token }),
   });
   if (!res.ok) {

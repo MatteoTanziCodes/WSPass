@@ -1,4 +1,12 @@
 
+> web@0.1.0 pretypecheck
+> npm run build -w @pass/shared
+
+
+> @pass/shared@0.1.0 build
+> tsc -p tsconfig.json
+
+
 > web@0.1.0 typecheck
 > tsc --noEmit
 

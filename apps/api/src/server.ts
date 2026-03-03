@@ -5,6 +5,8 @@ import fastifyStatic from "@fastify/static";
 import { registerRunsRoutes } from "./modules/runs/runs.routes";
 import { registerIntegrationRoutes } from "./modules/integrations/integrations.routes"; 
 import { registerBrandAssetRoutes } from "./modules/brandAssets/brandAssets.routes";
+import { registerProjectObservabilityRoutes } from "./modules/projectObservability/projectObservability.routes";
+import { registerProjectBuildRoutes } from "./modules/projectBuild/projectBuild.routes";
 
 
 loadDotenv({ path: resolve(__dirname, "../../../.env") });
@@ -25,6 +27,11 @@ async function start() {
   await registerRunsRoutes(app);
 
   await registerIntegrationRoutes(app);
+
+  await registerProjectObservabilityRoutes(app);
+  await registerProjectBuildRoutes(app);
+
+  await registerBrandAssetRoutes(app);
 
   const port = Number(process.env.PORT ?? 3001);
   const host = "0.0.0.0";

@@ -11,6 +11,8 @@ export function registerRunsRoutes(app: FastifyInstance) {
   app.get("/runs", controller.listRuns);  // Lists all runs with basic metadata from runs/index.json.
   app.get("/runs/:runId", controller.getRun);   // Fetches a specific run by ID, returning its details and artifacts metadata.
   app.get("/runs/:runId/artifacts/:artifactName", controller.getArtifact);  // Fetches a specific artifact by name for a given run, returning its metadata and payload.
+  app.get("/runs/:runId/logs", { preHandler: requireAgentAuth }, controller.listRunLogs);
+  app.get("/runs/:runId/logs/:logName", { preHandler: requireAgentAuth }, controller.getRunLog);
   app.patch("/runs/:runId", controller.updateRun);  // Updates a run's status and/or current step, 
   app.delete("/runs/:runId", { preHandler: requireAgentAuth }, controller.deleteRun);
 
@@ -51,6 +53,26 @@ export function registerRunsRoutes(app: FastifyInstance) {
     "/runs/:runId/decomposition-review-state",
     { preHandler: requireAgentAuth },
     controller.updateDecompositionReviewState
+  );
+  app.patch(
+    "/runs/:runId/build-state",
+    { preHandler: requireAgentAuth },
+    controller.updateBuildState
+  );
+  app.patch(
+    "/runs/:runId/issues/:issueId/state",
+    { preHandler: requireAgentAuth },
+    controller.updateIssueExecutionState
+  );
+  app.patch(
+    "/runs/:runId/issues/:issueId/requirements",
+    { preHandler: requireAgentAuth },
+    controller.updateIssueRequirements
+  );
+  app.patch(
+    "/runs/:runId/issues/:issueId/context-questions",
+    { preHandler: requireAgentAuth },
+    controller.updateIssueContextQuestions
   );
   app.patch(
     "/runs/:runId/decomposition-review-questions",

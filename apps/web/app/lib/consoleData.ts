@@ -1,5 +1,6 @@
 import "server-only";
 import { cache } from "react";
+import { deriveProjectKeyFromRun, deriveProjectLabelFromRun } from "@pass/shared";
 import {
   getArchitecturePack,
   getDecompositionPlan,
@@ -103,6 +104,34 @@ export function deriveRunDisplayTone(
   return bucket === "red" ? "danger" : bucket === "yellow" ? "accent" : "success";
 }
 
+export function deriveRunBlockedSummary(
+  run: Pick<RunListItem, "status" | "execution" | "decomposition_review_state">
+) {
+  const reviewState = run.decomposition_review_state;
+  if (run.status !== "review_blocked" && reviewState?.status !== "blocked") {
+    return null;
+  }
+
+  if (reviewState?.blocked_reason?.trim()) {
+    return reviewState.blocked_reason;
+  }
+
+  const openQuestions = reviewState?.questions.filter((question) => question.status === "open") ?? [];
+  if (openQuestions[0]?.prompt) {
+    return openQuestions[0].prompt;
+  }
+
+  if ((reviewState?.open_question_count ?? 0) > 0) {
+    return `Awaiting ${reviewState?.open_question_count} clarification answer(s).`;
+  }
+
+  if ((reviewState?.gap_count ?? 0) > 0) {
+    return `Blocked on ${reviewState?.gap_count} remaining coverage gap(s).`;
+  }
+
+  return "Build readiness review is blocked.";
+}
+
 export function isReviewReadyStatus(status?: DecompositionReviewStatus) {
   return status === "build_ready" || status === "synced";
 }
@@ -176,21 +205,11 @@ export function isFailedRunState(run: Pick<RunListItem, "status" | "execution">)
 }
 
 export function deriveProjectKey(run: RunListItem) {
-  return (
-    run.repo_state?.repository ??
-    run.input?.repo_target?.repository ??
-    run.input?.repo_target?.name ??
-    run.run_id
-  );
+  return deriveProjectKeyFromRun(run);
 }
 
 export function deriveProjectLabel(run: RunListItem) {
-  return (
-    run.repo_state?.repository ??
-    run.input?.repo_target?.repository ??
-    run.input?.repo_target?.name ??
-    "Untitled project"
-  );
+  return deriveProjectLabelFromRun(run);
 }
 
 export function buildProjectGroups(runs: RunListItem[]) {
@@ -283,7 +302,7 @@ export function deriveGates(
     ? architecturePack.clarifications.filter((item) => item.default_used).length
     : 0;
   const unresolvedOpenQuestions = architecturePack?.open_questions.length ?? 0;
-  const architectureBlocked = unresolvedClarifications > 0 || unresolvedOpenQuestions > 0;
+  const architectureBlocked = unresolvedOpenQuestions > 0;
 
   return {
     execActive,
@@ -301,12 +320,30 @@ export function deriveGates(
   };
 }
 
+export function describeArchitectureBlock(
+  unresolvedClarifications: number,
+  unresolvedOpenQuestions: number
+) {
+  if (unresolvedOpenQuestions > 0) {
+    return {
+      cta: "Answer open questions before decomposing",
+      title: "Architecture blocked by open questions",
+      detail:
+        "Decomposition is blocked until the remaining architecture-level open questions are answered through refinement.",
+    };
+  }
+
+  return null;
+}
+
 export function buildProgressItems(run: RunEnvelope["run"]) {
   const runBasePath = `/projects/${run.run_id}`;
+  const buildStateStatus = run.build_state?.status;
   const hasArchitecture =
     Boolean(run.step_timestamps.parse) ||
     Boolean(run.step_timestamps.plan) ||
     run.status !== "created";
+  const architectureAccepted = isReviewReadyStatus(run.decomposition_review_state?.status);
   const reviewBlocked =
     run.status === "review_blocked" || run.decomposition_review_state?.status === "blocked";
   const plannerFailed =
@@ -318,21 +355,32 @@ export function buildProgressItems(run: RunEnvelope["run"]) {
     (run.execution.workflow_name === "phase2-decomposition" ||
       run.execution.workflow_name === "phase2-decomposition-iterator");
   const buildFailed =
-    run.execution?.status === "failed" &&
-    run.execution.workflow_name === "phase2-implementation";
+    (run.execution?.status === "failed" &&
+      (run.execution.workflow_name === "phase2-implementation" ||
+        run.execution.workflow_name === "phase3-build-orchestrator" ||
+        run.execution.workflow_name === "phase3-issue-execution" ||
+        run.execution.workflow_name === "phase3-pr-supervisor")) ||
+    buildStateStatus === "failed";
   const architectureNeedsWork =
     run.current_step === "plan" ||
     run.current_step === "clarify" ||
     run.current_step === "parse";
+  const architectureRunning =
+    isActiveExecutionStatus(run.execution?.status) &&
+    (run.execution?.workflow_name === "phase1-planner" ||
+      run.execution?.workflow_name === "phase1-architecture-refinement");
   const decomposeInFlight =
     Boolean(run.repo_state) ||
     Boolean(run.decomposition_state?.generated_at) ||
     run.current_step === "decompose" ||
     run.current_step === "review";
   const buildInFlight =
+    buildStateStatus === "planning" ||
+    buildStateStatus === "running" ||
     Boolean(run.implementation_state) ||
     run.current_step === "approve" ||
-    run.current_step === "export";
+    run.current_step === "export" ||
+    run.current_step === "build";
   const issuesSynced = hasSyncedIssues(run);
 
   return [
@@ -349,18 +397,20 @@ export function buildProgressItems(run: RunEnvelope["run"]) {
       href: `${runBasePath}/architecture`,
       state: plannerFailed
         ? ("blocked" as const)
-        : hasArchitecture && !architectureNeedsWork
+        : architectureAccepted
             ? ("completed" as const)
-            : hasArchitecture
+            : architectureRunning
               ? ("active" as const)
               : ("pending" as const),
       detail: plannerFailed
         ? "Action required"
-        : hasArchitecture && !architectureNeedsWork
-          ? "Wireframe ready"
-          : hasArchitecture
+        : architectureAccepted
+          ? "Accepted"
+          : architectureRunning
             ? "Refinement in progress"
-            : "Awaiting plan",
+            : hasArchitecture && !architectureNeedsWork
+              ? "Wireframe ready"
+              : "Awaiting plan",
     },
     {
       key: "decompose",
@@ -388,17 +438,25 @@ export function buildProgressItems(run: RunEnvelope["run"]) {
       key: "build",
       label: "Build",
       href: `${runBasePath}/build`,
-      state: buildFailed
+      state: buildFailed || buildStateStatus === "blocked"
         ? ("blocked" as const)
-        : issuesSynced || buildInFlight
+        : buildStateStatus === "completed"
+            ? ("completed" as const)
+            : issuesSynced || buildInFlight
               ? ("active" as const)
               : ("pending" as const),
       detail: buildFailed
         ? "Action required"
+        : buildStateStatus === "completed"
+          ? "Merged"
+        : buildStateStatus === "blocked"
+          ? "Action required"
         : issuesSynced
           ? "Issues synced"
         : buildInFlight
-            ? "Sync in progress"
+            ? buildStateStatus === "planning" || buildStateStatus === "running"
+              ? "Execution running"
+              : "Sync in progress"
             : "Awaiting sync",
     },
   ];

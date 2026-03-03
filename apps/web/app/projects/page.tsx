@@ -110,7 +110,8 @@ export default async function ProjectsPage() {
             <span>Status</span>
           </div>
 
-          {projects.map((project) => (
+          {projects.map((project) => {
+            return (
             <Link
               key={project.key}
               href={`/projects/${project.latest.run_id}/architecture`}
@@ -125,14 +126,15 @@ export default async function ProjectsPage() {
                 </p>
               </div>
               <div className="font-mono text-sm text-[color:var(--ink)]">{project.runs.length}</div>
-              <div className="flex items-center justify-start">
+              <div className="flex min-w-0 flex-col items-start gap-2">
                 <StatusBadge
                   label={deriveRunDisplayStatus(project.latest)}
                   tone={deriveRunDisplayTone(project.latest)}
                 />
               </div>
             </Link>
-          ))}
+            );
+          })}
 
           {projects.length === 0 ? (
             <div className="px-4 py-10 font-mono text-sm uppercase tracking-[0.16em] text-[color:var(--muted)]">

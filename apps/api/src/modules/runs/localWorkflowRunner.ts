@@ -7,6 +7,7 @@ import type { RunStore } from "./runStore";
 type DispatchLocalWorkflowInput = {
   workflowName: WorkflowName;
   runId: string;
+  issueId?: string;
 };
 
 const workflowCliMap: Record<WorkflowName, string> = {
@@ -16,6 +17,9 @@ const workflowCliMap: Record<WorkflowName, string> = {
   "phase2-decomposition": "decomposition",
   "phase2-decomposition-iterator": "decompositionIterator",
   "phase2-implementation": "implementation",
+  "phase3-build-orchestrator": "buildOrchestrator",
+  "phase3-issue-execution": "issueExecution",
+  "phase3-pr-supervisor": "prSupervisor",
 };
 
 export class LocalWorkflowRunnerError extends Error {
@@ -39,6 +43,18 @@ function isLocalhostUrl(value?: string) {
     return ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
   } catch {
     return false;
+  }
+}
+
+function normalizeLoopbackUrl(value: string) {
+  try {
+    const url = new URL(value);
+    if (url.hostname === "localhost") {
+      url.hostname = "127.0.0.1";
+    }
+    return url.toString();
+  } catch {
+    return value;
   }
 }
 
@@ -95,19 +111,25 @@ export class LocalWorkflowRunner {
     const logFd = fs.openSync(logPath, "a");
     fs.writeFileSync(
       logFd,
-      `\n[${new Date().toISOString()}] dispatch ${input.workflowName} run_id=${input.runId} command=${command} args=${args.join(" ")}\n`
+      `\n[${new Date().toISOString()}] dispatch ${input.workflowName} run_id=${input.runId}${input.issueId ? ` issue_id=${input.issueId}` : ""} command=${command} args=${args.join(" ")}\n`
     );
 
-    const child = spawn(command, [...args, `--run-id=${input.runId}`], {
+    const child = spawn(
+      command,
+      [...args, `--run-id=${input.runId}`, ...(input.issueId ? [`--issue-id=${input.issueId}`] : [])],
+      {
       cwd: root,
       env: {
         ...process.env,
-        PASS_API_BASE_URL: process.env.PASS_API_BASE_URL ?? "http://localhost:3001",
+        PASS_API_BASE_URL: normalizeLoopbackUrl(
+          process.env.PASS_API_BASE_URL ?? "http://localhost:3001"
+        ),
       },
       detached: true,
       stdio: ["ignore", logFd, logFd],
       windowsHide: true,
-    });
+      }
+    );
 
     if (!child.pid) {
       fs.closeSync(logFd);
@@ -155,6 +177,22 @@ export class LocalWorkflowRunner {
       }
 
       await this.runStore.failExecution(input.runId, reason);
+
+      if (input.workflowName === "phase3-build-orchestrator") {
+        const now = new Date().toISOString();
+        const currentBuildState = run.build_state;
+        await this.runStore.updateBuildState(input.runId, {
+          status: "failed",
+          started_at: currentBuildState?.started_at ?? now,
+          completed_at: now,
+          current_ring: currentBuildState?.current_ring ?? 0,
+          max_parallel_workers: currentBuildState?.max_parallel_workers ?? 3,
+          issues: currentBuildState?.issues ?? [],
+          blocked_reason: reason,
+          summary: reason,
+          audit_artifact_name: currentBuildState?.audit_artifact_name,
+        });
+      }
     } catch {
       // Ignore fallback execution update errors and preserve the original workflow logs.
     }

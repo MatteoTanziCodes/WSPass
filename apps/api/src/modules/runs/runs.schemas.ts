@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   ArchitectureChatStateSchema,
+  BuildOrchestrationStateSchema,
   DecompositionStateSchema,
   DecompositionReviewStateSchema,
   ImplementationIssueStateCollectionSchema,
@@ -66,6 +67,7 @@ export const RunDetailSchema = RunRecordSchema.extend({
   decomposition_state: DecompositionStateSchema.optional(),
   decomposition_review_state: DecompositionReviewStateSchema.optional(),
   implementation_state: ImplementationIssueStateCollectionSchema.optional(),
+  build_state: BuildOrchestrationStateSchema.optional(),
 }).strict();
 
 export type RunDetail = z.infer<typeof RunDetailSchema>;

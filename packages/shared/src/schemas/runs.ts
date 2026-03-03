@@ -4,6 +4,7 @@ import {
   RUN_EXECUTION_STATUSES,
   WORKFLOW_NAMES,
 } from "../constants";
+import { BuildOrchestrationStateSchema } from "./buildExecution";
 
 export const PlannerRunSourceSchema = z
   .object({
@@ -189,6 +190,36 @@ export const ProjectContextSchema = z
 
 export type ProjectContext = z.infer<typeof ProjectContextSchema>;
 
+export const DecompositionRecommendedInputSchema = z
+  .object({
+    channel: z.enum([
+      "answer",
+      "prd_update",
+      "org_constraints_update",
+      "design_guidelines_update",
+    ]),
+    label: z.string().min(1),
+    prompt: z.string().min(1),
+  })
+  .strict();
+
+export type DecompositionRecommendedInput = z.infer<
+  typeof DecompositionRecommendedInputSchema
+>;
+
+export const DecompositionExpectedIssueSchema = z
+  .object({
+    title: z.string().min(1),
+    component: z.string().min(1),
+    category: z.enum(["frontend", "backend", "infra", "data", "ops", "docs"]),
+    reason: z.string().min(1),
+  })
+  .strict();
+
+export type DecompositionExpectedIssue = z.infer<
+  typeof DecompositionExpectedIssueSchema
+>;
+
 export const DecompositionGapSchema = z
   .object({
     id: z.string().min(1),
@@ -199,6 +230,11 @@ export const DecompositionGapSchema = z
     affected_components: z.array(z.string().min(1)).default([]),
     affected_work_item_ids: z.array(z.string().min(1)).default([]),
     auto_resolved: z.boolean().default(false),
+    why_blocked: z.string().min(1).optional(),
+    missing_information: z.array(z.string().min(1)).default([]),
+    evidence: z.array(z.string().min(1)).default([]),
+    recommended_inputs: z.array(DecompositionRecommendedInputSchema).default([]),
+    expected_issue_outcomes: z.array(DecompositionExpectedIssueSchema).default([]),
     resolution_notes: z.string().min(1).optional(),
   })
   .strict();
@@ -217,6 +253,11 @@ export const DecompositionClarifyingQuestionSchema = z
     resolved_at: z.string().datetime().optional(),
     related_requirement_ids: z.array(z.string().min(1)).default([]),
     related_components: z.array(z.string().min(1)).default([]),
+    derived_from_gap_ids: z.array(z.string().min(1)).default([]),
+    missing_information: z.array(z.string().min(1)).default([]),
+    evidence: z.array(z.string().min(1)).default([]),
+    recommended_inputs: z.array(DecompositionRecommendedInputSchema).default([]),
+    expected_issue_outcomes: z.array(DecompositionExpectedIssueSchema).default([]),
   })
   .strict();
 
@@ -228,11 +269,13 @@ export const DecompositionReviewArtifactSchema = z
   .object({
     generated_at: z.string().datetime(),
     summary: z.string().min(1),
+    blocking_summary: z.string().min(1).optional(),
     result: z.enum(["clean", "blocked", "amended"]),
     iteration_count: z.number().int().nonnegative(),
     gaps: z.array(DecompositionGapSchema).default([]),
     questions: z.array(DecompositionClarifyingQuestionSchema).default([]),
     amendments_applied: z.array(z.string().min(1)).default([]),
+    claude_review_notes: z.array(z.string().min(1)).default([]),
     coverage_snapshot: z.array(
       z.object({
         target_id: z.string().min(1),
@@ -335,14 +378,22 @@ export type ImplementationIssueStateCollection = z.infer<
 
 export const DecompositionReviewQuestionAnswerRequestSchema = z
   .object({
-    question_id: z.string().min(1),
+    question_id: z.string().min(1).optional(),
+    gap_id: z.string().min(1).optional(),
     answer: z.string().min(1),
     prd_text: z.string().min(1).optional(),
     org_constraints_text: z.string().min(1).optional(),
     design_guidelines_text: z.string().min(1).optional(),
   })
-  .strict();
+  .strict()
+  .refine((value) => Boolean(value.question_id || value.gap_id), {
+    message: "Provide question_id or gap_id",
+    path: ["question_id"],
+  });
 
 export type DecompositionReviewQuestionAnswerRequest = z.infer<
   typeof DecompositionReviewQuestionAnswerRequestSchema
 >;
+
+export const RunBuildStateSchema = BuildOrchestrationStateSchema;
+export type RunBuildState = z.infer<typeof RunBuildStateSchema>;

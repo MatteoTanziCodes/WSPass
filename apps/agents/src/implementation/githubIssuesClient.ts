@@ -1,3 +1,5 @@
+import { resolveIntegrationToken } from "../lib/integrationTokens";
+
 type IssuePlanItem = {
   id: string;
   title: string;
@@ -60,21 +62,6 @@ function resolveRepository(explicit?: { owner?: string; repo?: string }) {
   return { owner, repo };
 }
 
-function readGitHubToken(explicit?: string) {
-  const token =
-    explicit ??
-    process.env.PASS_GITHUB_WORKFLOW_TOKEN ??
-    process.env.GITHUB_WORKFLOW_TOKEN ??
-    process.env.PASS_GITHUB_TOKEN ??
-    process.env.GITHUB_TOKEN;
-  if (!token) {
-    throw new Error(
-      "GitHub issue sync requires PASS_GITHUB_WORKFLOW_TOKEN, GITHUB_WORKFLOW_TOKEN, PASS_GITHUB_TOKEN, or GITHUB_TOKEN."
-    );
-  }
-  return token;
-}
-
 function buildMarkerBlock(runId: string, itemId: string) {
   return [
     "",
@@ -114,12 +101,12 @@ function labelsMatch(issue: GitHubIssue, expectedLabels: string[]) {
 }
 
 export class GitHubIssuesClient {
-  private readonly token: string;
+  private readonly explicitToken: string | null;
   private readonly owner: string;
   private readonly repo: string;
 
   constructor(opts?: GitHubIssuesClientOptions) {
-    this.token = readGitHubToken(opts?.token);
+    this.explicitToken = opts?.token?.trim() || null;
     const repository = resolveRepository({ owner: opts?.owner, repo: opts?.repo });
     this.owner = repository.owner;
     this.repo = repository.repo;
@@ -217,12 +204,29 @@ export class GitHubIssuesClient {
     return response.filter((issue) => !issue.pull_request);
   }
 
+  private async getToken() {
+    return (
+      this.explicitToken ??
+      (await resolveIntegrationToken(
+        "github",
+        [
+          "PASS_GITHUB_WORKFLOW_TOKEN",
+          "GITHUB_WORKFLOW_TOKEN",
+          "PASS_GITHUB_TOKEN",
+          "GITHUB_TOKEN",
+        ],
+        "GitHub issue sync requires a connected admin integration or PASS_GITHUB_WORKFLOW_TOKEN / GITHUB_TOKEN."
+      ))
+    );
+  }
+
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const token = await this.getToken();
     const response = await fetch(`https://api.github.com/repos/${this.owner}/${this.repo}${path}`, {
       method,
       headers: {
         Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${this.token}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         "X-GitHub-Api-Version": "2022-11-28",
       },

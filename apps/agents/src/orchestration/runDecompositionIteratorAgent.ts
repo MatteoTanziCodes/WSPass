@@ -22,6 +22,10 @@ import {
   generateDecompositionPlan,
 } from "../providers/llmClient";
 import { renderSummary as renderDecompositionSummary } from "../decomposition/runDecompositionAgent";
+import {
+  LlmObservabilityRecorder,
+  withLlmObservabilityRecorder,
+} from "../lib/llmObservability";
 
 const MAX_ITERATIONS = 3;
 
@@ -564,12 +568,26 @@ function inferComponentForTarget(
   return pack.architecture.components.find((component) => component.type === "api") ?? pack.architecture.components[0];
 }
 
+function getTargetComponent(
+  pack: z.infer<typeof ArchitecturePackSchema>,
+  target: CoverageTarget
+) {
+  if (target.type === "component") {
+    return (
+      pack.architecture.components.find((component) => component.name === target.id) ??
+      inferComponentForTarget(pack, target)
+    );
+  }
+
+  return inferComponentForTarget(pack, target);
+}
+
 function makeCoverageWorkItem(
   pack: z.infer<typeof ArchitecturePackSchema>,
   plan: DecompositionPlan,
   target: CoverageTarget
 ) {
-  const component = inferComponentForTarget(pack, target);
+  const component = getTargetComponent(pack, target);
   if (!component) {
     return null;
   }
@@ -609,29 +627,374 @@ function makeCoverageWorkItem(
   });
 }
 
-function buildClarifyingQuestion(target: CoverageTarget): DecompositionQuestion {
+function buildRecommendedInputs(
+  target: CoverageTarget,
+  component?: z.infer<typeof ArchitecturePackSchema>["architecture"]["components"][number]
+) {
+  const inputs: z.infer<typeof DecompositionClarifyingQuestionSchema>["recommended_inputs"] = [
+    {
+      channel: "answer",
+      label: "Answer here",
+      prompt: `Answer the open question about ${target.type.replace(/_/g, " ")} "${target.id}".`,
+    },
+  ];
+
+  if (target.type === "requirement" || target.type === "workflow") {
+    inputs.push({
+      channel: "prd_update",
+      label: "Add PRD update",
+      prompt: `Add product behavior detail for ${target.type.replace(/_/g, " ")} "${target.id}".`,
+    });
+  }
+
+  if (
+    target.type === "integration" ||
+    target.type === "data_store" ||
+    target.type === "async_pattern" ||
+    target.type === "api_surface" ||
+    component?.type === "external_integration" ||
+    component?.type === "auth_provider"
+  ) {
+    inputs.push({
+      channel: "org_constraints_update",
+      label: "Add org constraints update",
+      prompt: `Add engineering or operational constraints for ${target.summary}.`,
+    });
+  }
+
+  if (
+    component?.type === "web" ||
+    target.tokens.some((token) => ["ui", "design", "page", "screen", "frontend"].includes(token))
+  ) {
+    inputs.push({
+      channel: "design_guidelines_update",
+      label: "Add design guidelines update",
+      prompt: `Add UI, brand, or frontend guidance for ${target.summary}.`,
+    });
+  }
+
+  return inputs;
+}
+
+function buildMissingInformation(
+  target: CoverageTarget,
+  component?: z.infer<typeof ArchitecturePackSchema>["architecture"]["components"][number]
+) {
+  if (target.type === "requirement" || target.type === "workflow") {
+    return [
+      `Clarify the implementation boundary for ${target.type.replace(/_/g, " ")} "${target.id}".`,
+      `Describe the backend, frontend, or data side effects required to complete "${target.summary}".`,
+    ];
+  }
+
+  if (target.type === "component" && component) {
+    if (component.type === "db") {
+      return [
+        `Confirm whether ${component.name} owns only schema and repository work, or also cleanup, projections, and reporting jobs.`,
+        `Confirm which application services are expected to read from or write to ${component.name}.`,
+      ];
+    }
+
+    if (component.type === "web") {
+      return [
+        `Confirm which pages, views, or interaction surfaces ${component.name} must deliver.`,
+        `Confirm whether ${component.name} needs additional design guidance before issues are created.`,
+      ];
+    }
+
+    if (component.type === "api") {
+      return [
+        `Confirm which routes, handlers, or mutations ${component.name} must implement.`,
+        `Confirm any side effects or downstream integrations ${component.name} owns.`,
+      ];
+    }
+  }
+
+  if (target.type === "integration") {
+    return [
+      `Clarify the integration boundary for "${target.id}" and the exact data exchanged.`,
+      `Confirm which component owns the outbound or inbound contract for "${target.id}".`,
+    ];
+  }
+
+  if (target.type === "data_store") {
+    return [
+      `Clarify which data lifecycle operations must be implemented for "${target.id}" (writes, reads, retention, cleanup).`,
+      `Confirm which components own persistence responsibilities for "${target.id}".`,
+    ];
+  }
+
+  if (target.type === "async_pattern") {
+    return [
+      `Clarify which producer and consumer flows are required for "${target.id}".`,
+      `Confirm retry, ordering, or compensation behavior for "${target.id}".`,
+    ];
+  }
+
+  if (target.type === "api_surface") {
+    return [
+      `Clarify which handlers, authorization rules, and persistence steps are required for "${target.id}".`,
+      `Confirm which component owns "${target.id}" so implementation issues can be scoped safely.`,
+    ];
+  }
+
+  return [
+    `Clarify the implementation ownership and expected behavior for "${target.summary}".`,
+  ];
+}
+
+function buildExpectedIssueOutcomes(
+  pack: z.infer<typeof ArchitecturePackSchema>,
+  target: CoverageTarget
+) {
+  const component = getTargetComponent(pack, target);
+  if (!component) {
+    return [];
+  }
+
+  if (component.type === "db") {
+    return [
+      {
+        title: `Create ${component.name} schema migration work`,
+        component: component.name,
+        category: "data" as const,
+        reason: `Claude needs enough detail to scope schema and persistence work for ${target.summary}.`,
+      },
+      {
+        title: `Implement ${component.name} repository and data access layer`,
+        component: component.name,
+        category: "backend" as const,
+        reason: `Coverage for ${component.name} likely requires application-side persistence code, not just data definitions.`,
+      },
+    ];
+  }
+
+  if (component.type === "web") {
+    return [
+      {
+        title: `Implement ${component.name} UI slice for ${target.id}`,
+        component: component.name,
+        category: "frontend" as const,
+        reason: `Claude expects a frontend issue once the exact UX scope is confirmed.`,
+      },
+    ];
+  }
+
+  if (component.type === "api") {
+    return [
+      {
+        title: `Implement ${component.name} handler for ${target.id}`,
+        component: component.name,
+        category: "backend" as const,
+        reason: `The API layer needs a concrete route or mutation issue once the missing behavior is confirmed.`,
+      },
+    ];
+  }
+
+  const genericWorkItem = makeCoverageWorkItem(pack, {
+    ...DecompositionPlanSchema.parse({
+      generated_at: new Date().toISOString(),
+      summary: "synthetic",
+      approval_notes: undefined,
+      work_items: [],
+    }),
+  }, target);
+
+  if (!genericWorkItem) {
+    return [];
+  }
+
+  return [
+    {
+      title: genericWorkItem.title,
+      component: genericWorkItem.component,
+      category: genericWorkItem.category,
+      reason: `Claude expects to create this implementation slice once the missing information for ${target.id} is resolved.`,
+    },
+  ];
+}
+
+function buildGapEvidence(
+  pack: z.infer<typeof ArchitecturePackSchema>,
+  target: CoverageTarget,
+  snapshot?: CoverageSnapshot
+) {
+  const component = getTargetComponent(pack, target);
+  const evidence = [
+    `Coverage snapshot marks ${target.type.replace(/_/g, " ")} "${target.id}" as ${snapshot?.status ?? "missing"}.`,
+  ];
+
+  if (component) {
+    evidence.push(`Architecture includes component "${component.name}" of type "${component.type}".`);
+  }
+
+  if (target.type === "requirement" || target.type === "workflow") {
+    evidence.push(`Project context still expects implementation coverage for "${target.summary}".`);
+  }
+
+  return evidence.slice(0, 3);
+}
+
+function shouldAutoAmendTarget(
+  pack: z.infer<typeof ArchitecturePackSchema>,
+  target: CoverageTarget
+) {
+  const component = getTargetComponent(pack, target);
+  if (!component) {
+    return false;
+  }
+
+  return (
+    target.type === "component" ||
+    target.type === "integration" ||
+    target.type === "data_store" ||
+    target.type === "async_pattern" ||
+    target.type === "api_surface"
+  );
+}
+
+function buildBlockingGapForTarget(
+  pack: z.infer<typeof ArchitecturePackSchema>,
+  target: CoverageTarget,
+  snapshot?: CoverageSnapshot
+): DecompositionGap {
+  const component = getTargetComponent(pack, target);
+  const missingInformation = buildMissingInformation(target, component);
+  const expectedIssueOutcomes = buildExpectedIssueOutcomes(pack, target);
+  const recommendedInputs = buildRecommendedInputs(target, component);
+  const evidence = buildGapEvidence(pack, target, snapshot);
+
+  return DecompositionGapSchema.parse({
+    id: `gap_${slugify(`${target.type}_${target.id}`)}`,
+    type: "missing_coverage",
+    severity:
+      target.type === "requirement" || target.type === "workflow"
+        ? "high"
+        : "medium",
+    summary: `Missing implementation coverage for ${target.type.replace(/_/g, " ")} "${target.id}".`,
+    affected_requirement_ids: target.type === "requirement" ? [target.id] : [],
+    affected_components: target.relatedComponents,
+    affected_work_item_ids: [],
+    auto_resolved: false,
+    why_blocked: `Claude cannot safely create the missing implementation issue(s) for ${target.summary} without this information.`,
+    missing_information: missingInformation,
+    evidence,
+    recommended_inputs: recommendedInputs,
+    expected_issue_outcomes: expectedIssueOutcomes,
+    resolution_notes: `Answer the missing-information prompts so Claude can create scoped implementation work for ${target.id}.`,
+  });
+}
+
+function findTargetForGap(targets: CoverageTarget[], gap: DecompositionGap) {
+  return targets.find((target) => gapAddressesTarget(gap, target));
+}
+
+function enrichGap(
+  pack: z.infer<typeof ArchitecturePackSchema>,
+  targets: CoverageTarget[],
+  coverageSnapshot: CoverageSnapshot[],
+  gap: DecompositionGap
+) {
+  const target = findTargetForGap(targets, gap);
+  if (!target) {
+    return gap;
+  }
+
+  const snapshot = coverageSnapshot.find(
+    (item) => item.target_id === target.id && item.target_type === target.type
+  );
+  const fallbackGap = buildBlockingGapForTarget(pack, target, snapshot);
+
+  return DecompositionGapSchema.parse({
+    ...fallbackGap,
+    ...gap,
+    why_blocked: gap.why_blocked ?? fallbackGap.why_blocked,
+    missing_information:
+      gap.missing_information.length > 0
+        ? gap.missing_information
+        : fallbackGap.missing_information,
+    evidence: gap.evidence.length > 0 ? gap.evidence : fallbackGap.evidence,
+    recommended_inputs:
+      gap.recommended_inputs.length > 0
+        ? gap.recommended_inputs
+        : fallbackGap.recommended_inputs,
+    expected_issue_outcomes:
+      gap.expected_issue_outcomes.length > 0
+        ? gap.expected_issue_outcomes
+        : fallbackGap.expected_issue_outcomes,
+    resolution_notes: gap.resolution_notes ?? fallbackGap.resolution_notes,
+  });
+}
+
+function buildClarifyingQuestion(
+  pack: z.infer<typeof ArchitecturePackSchema>,
+  target: CoverageTarget,
+  snapshot?: CoverageSnapshot
+): DecompositionQuestion {
+  const component = getTargetComponent(pack, target);
+  const missingInformation = buildMissingInformation(target, component);
+  const expectedIssueOutcomes = buildExpectedIssueOutcomes(pack, target);
+  const recommendedInputs = buildRecommendedInputs(target, component);
+  const evidence = buildGapEvidence(pack, target, snapshot);
+
   return DecompositionClarifyingQuestionSchema.parse({
     id: `dq_${slugify(`${target.type}_${target.id}`)}`,
     prompt: `How should we implement coverage for ${target.type.replace(/_/g, " ")} "${target.id}"?`,
-    rationale: `The iterator could not assign a safe implementation slice for ${target.summary}.`,
+    rationale: `Claude could not assign a safe implementation slice for ${target.summary} without additional detail.`,
     status: "open",
     created_at: new Date().toISOString(),
     related_requirement_ids: target.type === "requirement" ? [target.id] : [],
     related_components: target.relatedComponents,
+    derived_from_gap_ids: [],
+    missing_information: missingInformation,
+    evidence,
+    recommended_inputs: recommendedInputs,
+    expected_issue_outcomes: expectedIssueOutcomes,
   });
 }
 
-function buildClarifyingQuestionFromGap(gap: DecompositionGap): DecompositionQuestion {
+function buildClarifyingQuestionFromGap(
+  pack: z.infer<typeof ArchitecturePackSchema>,
+  targets: CoverageTarget[],
+  coverageSnapshot: CoverageSnapshot[],
+  gap: DecompositionGap
+): DecompositionQuestion {
+  const enrichedGap = enrichGap(pack, targets, coverageSnapshot, gap);
+  const missingInformation =
+    enrichedGap.missing_information.length > 0
+      ? enrichedGap.missing_information
+      : [`Clarify the implementation ownership and missing behavior for "${gap.summary}".`];
+  const evidence =
+    enrichedGap.evidence.length > 0
+      ? enrichedGap.evidence
+      : ["The iterator review still reports this gap as unresolved."];
+  const recommendedInputs =
+    enrichedGap.recommended_inputs.length > 0
+      ? enrichedGap.recommended_inputs
+      : [
+          {
+            channel: "answer" as const,
+            label: "Answer here",
+            prompt: `Provide the missing implementation detail needed to resolve "${gap.summary}".`,
+          },
+        ];
+
   return DecompositionClarifyingQuestionSchema.parse({
     id: `dq_gap_${slugify(gap.id)}`,
     prompt: `Resolve coverage gap: ${gap.summary}`,
     rationale:
-      gap.resolution_notes ||
+      enrichedGap.why_blocked ||
+      enrichedGap.resolution_notes ||
       `The iterator cannot safely complete this decomposition while the ${gap.type.replace(/_/g, " ")} gap remains.`,
     status: "open",
     created_at: new Date().toISOString(),
     related_requirement_ids: gap.affected_requirement_ids,
     related_components: gap.affected_components,
+    derived_from_gap_ids: [gap.id],
+    missing_information: missingInformation,
+    evidence,
+    recommended_inputs: recommendedInputs,
+    expected_issue_outcomes: enrichedGap.expected_issue_outcomes,
   });
 }
 
@@ -660,6 +1023,11 @@ function normalizeIteratorQuestions(
       created_at: new Date().toISOString(),
       related_requirement_ids: question.related_requirement_ids,
       related_components: question.related_components,
+      derived_from_gap_ids: question.derived_from_gap_ids,
+      missing_information: question.missing_information,
+      evidence: question.evidence,
+      recommended_inputs: question.recommended_inputs,
+      expected_issue_outcomes: question.expected_issue_outcomes,
     })
   );
 }
@@ -768,9 +1136,15 @@ function renderReviewSummary(review: DecompositionReviewArtifact) {
     `Iterations: ${review.iteration_count}`,
     "",
     review.summary,
+    ...(review.blocking_summary ? ["", "## Blocking Summary", review.blocking_summary] : []),
     "",
     "## Amendments Applied",
     ...(review.amendments_applied.length > 0 ? review.amendments_applied.map((item) => `- ${item}`) : ["- None"]),
+    "",
+    "## Claude Review Notes",
+    ...(review.claude_review_notes.length > 0
+      ? review.claude_review_notes.map((item) => `- ${item}`)
+      : ["- None"]),
     "",
     "## Open Questions",
     ...(review.questions.length > 0 ? review.questions.map((item) => `- ${item.prompt}`) : ["- None"]),
@@ -796,10 +1170,30 @@ function buildReviewState(
     open_question_count: review.questions.filter((question) => question.status === "open").length,
     clean_at: resultStatus === "build_ready" ? review.generated_at : undefined,
     blocked_reason:
-      resultStatus === "blocked" && review.questions.length > 0
-        ? "Clarifying answers are required before the project is build-ready."
+      resultStatus === "blocked"
+        ? review.blocking_summary ??
+          review.questions[0]?.prompt ??
+          "Clarifying answers are required before the project is build-ready."
         : undefined,
     questions: review.questions,
+  });
+}
+
+function buildProgressReviewState(
+  current: z.infer<typeof DecompositionReviewStateSchema> | undefined,
+  message: string
+) {
+  return DecompositionReviewStateSchema.parse({
+    artifact_name: "decomposition_review",
+    iteration_count: current?.iteration_count ?? 0,
+    gap_count: current?.gap_count ?? 0,
+    open_question_count: current?.open_question_count ?? 0,
+    questions: current?.questions ?? [],
+    source_decomposition_generated_at: current?.source_decomposition_generated_at,
+    clean_at: current?.clean_at,
+    last_reviewed_at: new Date().toISOString(),
+    status: "iterating",
+    blocked_reason: message,
   });
 }
 
@@ -814,6 +1208,7 @@ async function reviewPlan(
 }> {
   let currentPlan = startingPlan;
   const allAmendments: string[] = [];
+  const allClaudeReviewNotes: string[] = [];
 
   for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration += 1) {
     const amendmentsBeforeIteration = allAmendments.length;
@@ -823,14 +1218,6 @@ async function reviewPlan(
 
     const targets = buildCoverageTargets(pack);
     const initialSnapshot = buildCoverageSnapshot(pack, currentPlan);
-    const missingTargets = targets.filter((target) =>
-      initialSnapshot.some(
-        (snapshot) =>
-          snapshot.target_id === target.id &&
-          snapshot.target_type === target.type &&
-          snapshot.status === "missing"
-      )
-    );
 
     const claudeReview = await generateDecompositionIteratorReview({
       pack,
@@ -839,6 +1226,11 @@ async function reviewPlan(
       coverageSnapshot: initialSnapshot,
       iteration,
     });
+    allClaudeReviewNotes.push(
+      ...claudeReview.claude_review_notes.filter(
+        (item, index, source) => item.trim().length > 0 && source.indexOf(item) === index
+      )
+    );
     const additions = normalizeIteratorSuggestedWorkItems(
       pack,
       currentPlan,
@@ -861,63 +1253,108 @@ async function reviewPlan(
     const iterationAddedAmendments = allAmendments.length > amendmentsBeforeIteration;
 
     const finalSnapshot = buildCoverageSnapshot(pack, currentPlan);
-    const deterministicRemainingGaps = finalSnapshot
-      .filter((snapshot) => snapshot.status === "missing")
-      .map((snapshot) =>
-        DecompositionGapSchema.parse({
-          id: `gap_${slugify(`${snapshot.target_type}_${snapshot.target_id}`)}`,
-          type: "missing_coverage",
-          severity:
-            snapshot.target_type === "requirement" || snapshot.target_type === "workflow"
-              ? "high"
-              : "medium",
-          summary: `Missing implementation coverage for ${snapshot.target_type.replace(/_/g, " ")} "${snapshot.target_id}".`,
-          affected_requirement_ids:
-            snapshot.target_type === "requirement" ? [snapshot.target_id] : [],
-          affected_components:
-            targets.find(
-              (target) => target.id === snapshot.target_id && target.type === snapshot.target_type
-            )?.relatedComponents ?? [],
-          affected_work_item_ids: [],
-          auto_resolved: false,
-        })
-      );
-    const claudeRemainingGaps = claudeReview.gaps.filter((gap) => !gap.auto_resolved);
+    const finalMissingTargets = targets.filter((target) =>
+      finalSnapshot.some(
+        (snapshot) =>
+          snapshot.target_id === target.id &&
+          snapshot.target_type === target.type &&
+          snapshot.status === "missing"
+      )
+    );
+    const deterministicAutoAdditions = finalMissingTargets
+      .filter((target) => shouldAutoAmendTarget(pack, target))
+      .map((target) => makeCoverageWorkItem(pack, currentPlan, target))
+      .filter((item): item is DecompositionWorkItem => Boolean(item))
+      .filter((item) => {
+        const hasCoveringItem = currentPlan.work_items.some(
+          (existing) =>
+            normalizeText(existing.component).trim() === normalizeText(item.component).trim() &&
+            existing.labels.some((label) => item.labels.includes(label))
+        );
+        return !hasCoveringItem;
+      });
+
+    if (deterministicAutoAdditions.length > 0) {
+      for (const item of deterministicAutoAdditions) {
+        allAmendments.push(`Iterator added ${item.id}: ${item.title}.`);
+      }
+
+      currentPlan = DecompositionPlanSchema.parse({
+        ...currentPlan,
+        generated_at: new Date().toISOString(),
+        work_items: [...currentPlan.work_items, ...deterministicAutoAdditions],
+      });
+      continue;
+    }
+
+    const deterministicRemainingGaps = finalMissingTargets.map((target) =>
+      buildBlockingGapForTarget(
+        pack,
+        target,
+        finalSnapshot.find(
+          (snapshot) => snapshot.target_id === target.id && snapshot.target_type === target.type
+        )
+      )
+    );
+    const claudeRemainingGaps = claudeReview.gaps
+      .filter((gap) => !gap.auto_resolved)
+      .map((gap) => enrichGap(pack, targets, finalSnapshot, gap));
     const remainingGaps = mergeGaps(deterministicRemainingGaps, claudeRemainingGaps);
 
-    for (const target of missingTargets) {
+    for (const target of finalMissingTargets) {
       if (
         (target.type === "requirement" || target.type === "workflow") &&
         !questions.some((question) => questionAddressesTarget(question, target)) &&
         !remainingGaps.some((gap) => gapAddressesTarget(gap, target))
       ) {
-        questions.push(buildClarifyingQuestion(target));
+        questions.push(
+          buildClarifyingQuestion(
+            pack,
+            target,
+            finalSnapshot.find(
+              (snapshot) => snapshot.target_id === target.id && snapshot.target_type === target.type
+            )
+          )
+        );
       }
     }
 
     for (const gap of remainingGaps) {
-      const alreadyCoveredByQuestion = questions.some((question) => {
-        if (
-          question.related_requirement_ids.some((id) => gap.affected_requirement_ids.includes(id))
-        ) {
-          return true;
-        }
-
-        if (question.related_components.some((component) => gap.affected_components.includes(component))) {
-          return true;
-        }
-
-        const questionTokens = tokens(`${question.prompt} ${question.rationale}`);
-        const gapTokens = tokens(`${gap.summary} ${gap.resolution_notes ?? ""}`);
-        return gapTokens.some((token) => questionTokens.includes(token));
-      });
+      const alreadyCoveredByQuestion = questions.some((question) =>
+        question.derived_from_gap_ids.includes(gap.id)
+      );
 
       if (!alreadyCoveredByQuestion) {
-        questions.push(buildClarifyingQuestionFromGap(gap));
+        questions.push(buildClarifyingQuestionFromGap(pack, targets, finalSnapshot, gap));
       }
     }
 
-    if (remainingGaps.length === 0 && questions.length === 0 && !iterationAddedAmendments) {
+    const blockingGaps = remainingGaps.filter((gap) => gap.missing_information.length > 0);
+    const nonBlockingGaps = remainingGaps.filter((gap) => gap.missing_information.length === 0);
+    let addedNonBlockingWork = false;
+    for (const gap of nonBlockingGaps) {
+      const target = findTargetForGap(targets, gap);
+      if (!target) {
+        continue;
+      }
+
+      const autoItem = makeCoverageWorkItem(pack, currentPlan, target);
+      if (autoItem) {
+        allAmendments.push(`Iterator added ${autoItem.id}: ${autoItem.title}.`);
+        currentPlan = DecompositionPlanSchema.parse({
+          ...currentPlan,
+          generated_at: new Date().toISOString(),
+          work_items: [...currentPlan.work_items, autoItem],
+        });
+        addedNonBlockingWork = true;
+      }
+    }
+
+    if (addedNonBlockingWork) {
+      continue;
+    }
+
+    if (blockingGaps.length === 0 && questions.length === 0 && !iterationAddedAmendments) {
       return {
         plan: currentPlan,
         review: DecompositionReviewArtifactSchema.parse({
@@ -927,16 +1364,18 @@ async function reviewPlan(
           }),
           result: "clean",
           iteration_count: iteration,
+          blocking_summary: undefined,
           gaps: [],
           questions: [],
           amendments_applied: allAmendments,
+          claude_review_notes: allClaudeReviewNotes,
           coverage_snapshot: finalSnapshot,
         }),
         stateStatus: "build_ready",
       };
     }
 
-    if (remainingGaps.length === 0 && questions.length === 0 && iterationAddedAmendments) {
+    if (blockingGaps.length === 0 && questions.length === 0 && iterationAddedAmendments) {
       if (iteration < MAX_ITERATIONS) {
         continue;
       }
@@ -963,26 +1402,35 @@ async function reviewPlan(
             "Iterator kept auto-amending the decomposition but did not complete a final clean no-change pass before the iteration limit. Rerun build readiness review.",
           result: "blocked",
           iteration_count: iteration,
+          blocking_summary:
+            "The decomposition changed during the final review pass. Rerun build readiness to confirm no new issues are added.",
           gaps: [stabilizationGap],
           questions: [],
           amendments_applied: allAmendments,
+          claude_review_notes: allClaudeReviewNotes,
           coverage_snapshot: finalSnapshot,
         }),
         stateStatus: "blocked",
       };
     }
 
-    if (questions.length > 0 || iteration === MAX_ITERATIONS) {
+    if (questions.length > 0 || blockingGaps.length > 0 || iteration === MAX_ITERATIONS) {
       return {
         plan: currentPlan,
         review: DecompositionReviewArtifactSchema.parse({
           generated_at: new Date().toISOString(),
-          summary: summarizeResult("blocked", remainingGaps, questions, allAmendments),
+          summary: summarizeResult("blocked", blockingGaps, questions, allAmendments),
+          blocking_summary:
+            claudeReview.blocking_summary ??
+            (questions.length > 0
+              ? "Claude still needs the information listed in the open questions before it can finish issue generation."
+              : "Claude still needs the information listed in the remaining gaps before it can finish issue generation."),
           result: "blocked",
           iteration_count: iteration,
-          gaps: remainingGaps,
+          gaps: blockingGaps,
           questions,
           amendments_applied: allAmendments,
+          claude_review_notes: allClaudeReviewNotes,
           coverage_snapshot: finalSnapshot,
         }),
         stateStatus: "blocked",
@@ -994,19 +1442,29 @@ async function reviewPlan(
 }
 
 export async function runDecompositionIteratorAgent(runId: string): Promise<void> {
+  const baseUrl = readRequiredEnv("PASS_API_BASE_URL");
+  const token = readRequiredEnv("PASS_API_TOKEN");
   const api = new PassApiClient({
-    baseUrl: readRequiredEnv("PASS_API_BASE_URL"),
-    token: readRequiredEnv("PASS_API_TOKEN"),
+    baseUrl,
+    token,
   });
 
   const githubRunId = process.env.GITHUB_RUN_ID ? Number(process.env.GITHUB_RUN_ID) : undefined;
   const githubRunUrl = process.env.GITHUB_RUN_URL;
+  let recorder: LlmObservabilityRecorder | undefined;
+  let sessionStatus: "running" | "succeeded" | "failed" = "running";
 
   try {
     const run = await api.getRun(runId);
     if (!run.repo_state) {
       throw new Error("Target repository has not been resolved for this run.");
     }
+    recorder = new LlmObservabilityRecorder({
+      runId,
+      workflowName: "phase2-decomposition-iterator",
+      backend: run.execution?.backend,
+      model: process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6",
+    });
 
     await api.updateExecution(runId, {
       status: "running",
@@ -1014,19 +1472,19 @@ export async function runDecompositionIteratorAgent(runId: string): Promise<void
       github_run_url: githubRunUrl,
     });
 
-    await api.updateDecompositionReviewState(runId, {
-      ...(run.decomposition_review_state ?? {
-        artifact_name: "decomposition_review",
-        iteration_count: 0,
-        gap_count: 0,
-        open_question_count: 0,
-        questions: [],
-      }),
-      status: "iterating",
-      artifact_name: "decomposition_review",
-      questions: run.decomposition_review_state?.questions ?? [],
-    });
+    let progressState = buildProgressReviewState(
+      run.decomposition_review_state,
+      "Preparing iterator review."
+    );
+    console.log(`[iterator] ${progressState.blocked_reason}`);
+    await api.updateDecompositionReviewState(runId, progressState);
 
+    progressState = buildProgressReviewState(
+      progressState,
+      "Loading architecture and refinement artifacts."
+    );
+    console.log(`[iterator] ${progressState.blocked_reason}`);
+    await api.updateDecompositionReviewState(runId, progressState);
     const packArtifact = await api.getArtifact(runId, "architecture_pack");
     const pack = ArchitecturePackSchema.parse(packArtifact.payload);
 
@@ -1043,6 +1501,12 @@ export async function runDecompositionIteratorAgent(runId: string): Promise<void
       ? ArchitectureChatStateSchema.parse(chatArtifact.payload)
       : run.architecture_chat;
 
+    progressState = buildProgressReviewState(
+      progressState,
+      "Building condensed project context for Claude review."
+    );
+    console.log(`[iterator] ${progressState.blocked_reason}`);
+    await api.updateDecompositionReviewState(runId, progressState);
     const projectContext = buildProjectContext({
       pack,
       normalizedPrdText: typeof normalizedPrd?.payload === "string" ? normalizedPrd.payload : undefined,
@@ -1066,6 +1530,14 @@ export async function runDecompositionIteratorAgent(runId: string): Promise<void
       payload: renderProjectContextSummary(projectContext),
     });
 
+    progressState = buildProgressReviewState(
+      progressState,
+      existingPlanArtifact
+        ? "Refreshing decomposition draft against the latest architecture."
+        : "Generating the first decomposition draft."
+    );
+    console.log(`[iterator] ${progressState.blocked_reason}`);
+    await api.updateDecompositionReviewState(runId, progressState);
     let plan = existingPlanArtifact
       ? DecompositionPlanSchema.parse(existingPlanArtifact.payload)
       : await generateDecompositionPlan({ pack });
@@ -1075,7 +1547,9 @@ export async function runDecompositionIteratorAgent(runId: string): Promise<void
       new Date(plan.generated_at).getTime() < new Date(pack.created_at).getTime();
 
     if (needsFreshPlan) {
-      plan = await generateDecompositionPlan({ pack });
+      plan = await withLlmObservabilityRecorder(recorder, () =>
+        generateDecompositionPlan({ pack })
+      );
     }
 
     await api.uploadArtifact(runId, {
@@ -1095,7 +1569,15 @@ export async function runDecompositionIteratorAgent(runId: string): Promise<void
       work_item_count: plan.work_items.length,
     });
 
-    const reviewed = await reviewPlan(pack, projectContext, plan);
+    progressState = buildProgressReviewState(
+      progressState,
+      "Running Claude iterator review over decomposition coverage."
+    );
+    console.log(`[iterator] ${progressState.blocked_reason}`);
+    await api.updateDecompositionReviewState(runId, progressState);
+    const reviewed = await withLlmObservabilityRecorder(recorder, () =>
+      reviewPlan(pack, projectContext, plan)
+    );
 
     if (
       reviewed.plan.generated_at !== plan.generated_at ||
@@ -1129,6 +1611,9 @@ export async function runDecompositionIteratorAgent(runId: string): Promise<void
       content_type: "text/markdown",
       payload: renderReviewSummary(reviewed.review),
     });
+    console.log(
+      `[iterator] Completed with result=${reviewed.review.result} iterations=${reviewed.review.iteration_count}`
+    );
     await api.updateDecompositionReviewState(
       runId,
       buildReviewState(reviewed.review, reviewed.plan, reviewed.stateStatus)
@@ -1142,8 +1627,10 @@ export async function runDecompositionIteratorAgent(runId: string): Promise<void
       github_run_id: Number.isFinite(githubRunId) ? githubRunId : undefined,
       github_run_url: githubRunUrl,
     });
+    sessionStatus = "succeeded";
   } catch (error) {
     const message = buildFailureMessage(error);
+    sessionStatus = "failed";
     try {
       await api.updateExecution(runId, {
         status: "failed",
@@ -1156,5 +1643,14 @@ export async function runDecompositionIteratorAgent(runId: string): Promise<void
     }
 
     throw error;
+  } finally {
+    if (recorder) {
+      recorder.complete(sessionStatus);
+      try {
+        await recorder.flush({ baseUrl, token });
+      } catch {
+        // Preserve the primary workflow result if observability flush fails.
+      }
+    }
   }
 }

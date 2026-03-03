@@ -12,7 +12,11 @@ import {
   deleteRun,
   dispatchWorkflow,
   getRun,
+  putProjectBuildSecret,
+  updateProjectObservabilityBudget,
   updateArchitectureChat,
+  updateIssueContextQuestions,
+  updateIssueRequirements,
 } from "./lib/passApi";
 
 const DOCX_MIME_TYPE =
@@ -27,6 +31,16 @@ const SUPPORTED_NATURAL_LANGUAGE_FILE_EXTENSIONS = new Set([
 
 function buildProjectRedirect(runId: string, fallbackPath?: string) {
   return fallbackPath?.trim() || `/projects/${runId}/architecture`;
+}
+
+function withNavigationNonce(target: string) {
+  const trimmed = target.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+
+  const separator = trimmed.includes("?") ? "&" : "?";
+  return `${trimmed}${separator}nav=${Date.now()}`;
 }
 
 function isActiveExecutionConflict(error: unknown) {
@@ -67,6 +81,20 @@ function shouldWaitForWorkflowChain() {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseNullableUsdValue(raw: FormDataEntryValue | null) {
+  const text = String(raw ?? "").trim();
+  if (!text) {
+    return null;
+  }
+
+  const value = Number(text);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error("Budget thresholds must be non-negative numbers.");
+  }
+
+  return value;
 }
 
 async function waitForWorkflowTerminal(
@@ -249,7 +277,14 @@ export async function createRunAction(formData: FormData) {
       : repoTarget.name;
   await dispatchWorkflow(run.run_id, "phase1-planner");
   revalidatePath("/");
-  redirect(buildProjectRedirect(run.run_id, `/projects/${run.run_id}/architecture?project=${encodeURIComponent(projectKey)}`));
+  redirect(
+    withNavigationNonce(
+      buildProjectRedirect(
+        run.run_id,
+        `/projects/${run.run_id}/architecture?project=${encodeURIComponent(projectKey)}`
+      )
+    )
+  );
 }
 
 // Dispatch workflows
@@ -262,21 +297,25 @@ export async function dispatchWorkflowAction(formData: FormData) {
     | "phase2-repo-provision"
     | "phase2-decomposition"
     | "phase2-decomposition-iterator"
-    | "phase2-implementation";
+    | "phase2-implementation"
+    | "phase3-build-orchestrator"
+    | "phase3-issue-execution"
+    | "phase3-pr-supervisor";
+  const issueId = String(formData.get("issue_id") ?? "").trim() || undefined;
 
   if (!runId || !workflowName) {
     throw new Error("run_id and workflow_name are required.");
   }
 
   try {
-    await dispatchWorkflow(runId, workflowName);
+    await dispatchWorkflow(runId, workflowName, issueId ? { issueId } : undefined);
   } catch (error) {
     if (!isActiveExecutionConflict(error)) {
       throw error;
     }
   }
   revalidateRunPaths(runId);
-  redirect(buildProjectRedirect(runId, returnTo));
+  redirect(withNavigationNonce(buildProjectRedirect(runId, returnTo)));
 }
 
 export async function deleteProjectAction(formData: FormData) {
@@ -299,7 +338,36 @@ export async function deleteProjectAction(formData: FormData) {
     revalidateRunPaths(runId);
   }
 
-  redirect(returnTo);
+  redirect(withNavigationNonce(returnTo));
+}
+
+export async function updateProjectObservabilityBudgetAction(formData: FormData) {
+  const projectKey = String(formData.get("project_key") ?? "").trim();
+  const returnTo = String(formData.get("return_to") ?? "").trim() || "/maintenance";
+
+  if (!projectKey) {
+    throw new Error("project_key is required.");
+  }
+
+  const warningUsd = parseNullableUsdValue(formData.get("warning_usd"));
+  const criticalUsd = parseNullableUsdValue(formData.get("critical_usd"));
+
+  if (
+    warningUsd !== null &&
+    criticalUsd !== null &&
+    criticalUsd < warningUsd
+  ) {
+    throw new Error("Critical threshold must be greater than or equal to warning threshold.");
+  }
+
+  await updateProjectObservabilityBudget(projectKey, {
+    warning_usd: warningUsd,
+    critical_usd: criticalUsd,
+  });
+
+  revalidatePath("/maintenance");
+  revalidatePath(returnTo);
+  redirect(withNavigationNonce(returnTo));
 }
 
 // Send refinement feedback
@@ -373,7 +441,7 @@ export async function sendArchitectureFeedbackAction(formData: FormData) {
     }
   }
   revalidateRunPaths(runId);
-  redirect(buildProjectRedirect(runId, returnTo));
+  redirect(withNavigationNonce(buildProjectRedirect(runId, returnTo)));
 }
 
 export async function runBuildReadinessAction(formData: FormData) {
@@ -402,29 +470,14 @@ export async function runBuildReadinessAction(formData: FormData) {
       throw error;
     }
   }
-
-  const completedRun = await waitForWorkflowTerminal(
-    runId,
-    workflowName,
-    150_000
-  );
-  ensureWorkflowSucceeded(completedRun, workflowName);
   revalidateRunPaths(runId);
-
-  if (workflowName === "phase2-decomposition") {
-    redirect(buildProjectRedirect(runId, returnTo));
-  }
-
-  if (isReviewReadyStatus(completedRun?.run.decomposition_review_state?.status)) {
-    redirect(`/projects/${runId}/build`);
-  }
-
-  redirect(buildProjectRedirect(runId, returnTo));
+  redirect(withNavigationNonce(buildProjectRedirect(runId, returnTo)));
 }
 
 export async function answerDecompositionReviewQuestionAction(formData: FormData) {
   const runId = String(formData.get("run_id") ?? "").trim();
   const questionId = String(formData.get("question_id") ?? "").trim();
+  const gapId = String(formData.get("gap_id") ?? "").trim();
   const returnTo = String(formData.get("return_to") ?? "").trim() || undefined;
   const answer = String(formData.get("answer") ?? "").trim();
   const prdInput = await readNaturalLanguageInput(
@@ -443,12 +496,13 @@ export async function answerDecompositionReviewQuestionAction(formData: FormData
     "iterator_design_guidelines_file"
   );
 
-  if (!runId || !questionId || !answer) {
-    throw new Error("run_id, question_id, and answer are required.");
+  if (!runId || (!questionId && !gapId) || !answer) {
+    throw new Error("run_id, answer, and either question_id or gap_id are required.");
   }
 
   await answerDecompositionReviewQuestion(runId, {
-    question_id: questionId,
+    question_id: questionId || undefined,
+    gap_id: gapId || undefined,
     answer,
     prd_text: prdInput.text,
     org_constraints_text: orgConstraintsInput.text,
@@ -468,7 +522,7 @@ export async function answerDecompositionReviewQuestionAction(formData: FormData
   );
 
   const messageParts = [
-    `Iterator clarification answer for ${questionId}:\n${answer}`,
+    `Iterator clarification answer for ${questionId || gapId}:\n${answer}`,
   ];
   if (prdInput.text) {
     messageParts.push(`New PRD context:\n${prdInput.text}`);
@@ -516,8 +570,154 @@ export async function answerDecompositionReviewQuestionAction(formData: FormData
   revalidateRunPaths(runId);
 
   if (isReviewReadyStatus(finalRun?.run.decomposition_review_state?.status)) {
-    redirect(`/projects/${runId}/build`);
+    redirect(withNavigationNonce(`/projects/${runId}/build`));
   }
 
-  redirect(buildProjectRedirect(runId, returnTo));
+  redirect(withNavigationNonce(buildProjectRedirect(runId, returnTo)));
+}
+
+export async function startBuildAction(formData: FormData) {
+  const runId = String(formData.get("run_id") ?? "").trim();
+  const returnTo = String(formData.get("return_to") ?? "").trim() || `/projects/${runId}/build`;
+
+  if (!runId) {
+    throw new Error("run_id is required.");
+  }
+
+  try {
+    await dispatchWorkflow(runId, "phase3-build-orchestrator");
+  } catch (error) {
+    if (!isActiveExecutionConflict(error)) {
+      throw error;
+    }
+  }
+
+  revalidateRunPaths(runId);
+  redirect(withNavigationNonce(returnTo));
+}
+
+export async function rerunIssueExecutionAction(formData: FormData) {
+  const runId = String(formData.get("run_id") ?? "").trim();
+  const issueId = String(formData.get("issue_id") ?? "").trim();
+  const returnTo = String(formData.get("return_to") ?? "").trim() || `/projects/${runId}/build`;
+
+  if (!runId || !issueId) {
+    throw new Error("run_id and issue_id are required.");
+  }
+
+  const run = await getRun(runId);
+  const issue = run?.run.build_state?.issues.find((candidate) => candidate.issue_id === issueId);
+  if (!issue) {
+    throw new Error(`Issue ${issueId} is not tracked in this run's build state.`);
+  }
+
+  const workflowName =
+    issue.status === "pr_open" || issue.status === "testing" || issue.status === "fixing"
+      ? "phase3-pr-supervisor"
+      : "phase3-issue-execution";
+
+  try {
+    await dispatchWorkflow(runId, workflowName, { issueId });
+  } catch (error) {
+    if (!isActiveExecutionConflict(error)) {
+      throw error;
+    }
+  }
+
+  revalidateRunPaths(runId);
+  redirect(withNavigationNonce(returnTo));
+}
+
+export async function resolveProjectSecretRequirementAction(formData: FormData) {
+  const runId = String(formData.get("run_id") ?? "").trim();
+  const issueId = String(formData.get("issue_id") ?? "").trim();
+  const requirementId = String(formData.get("requirement_id") ?? "").trim();
+  const projectKey = String(formData.get("project_key") ?? "").trim();
+  const name = String(formData.get("name") ?? "").trim();
+  const kind = String(formData.get("kind") ?? "").trim() as
+    | "integration"
+    | "project_secret"
+    | "project_variable";
+  const providerRaw = String(formData.get("provider") ?? "").trim();
+  const value = String(formData.get("value") ?? "").trim();
+  const returnTo = String(formData.get("return_to") ?? "").trim() || `/projects/${runId}/build`;
+
+  if (!runId || !issueId || !requirementId || !projectKey || !name || !kind) {
+    throw new Error("run_id, issue_id, requirement_id, project_key, name, and kind are required.");
+  }
+
+  if (kind === "integration") {
+    throw new Error("Integration requirements must be resolved through the admin panel.");
+  }
+
+  if (!value) {
+    throw new Error("A secret or variable value is required.");
+  }
+
+  const provider =
+    providerRaw === "github" ||
+    providerRaw === "anthropic" ||
+    providerRaw === "stripe" ||
+    providerRaw === "sentry" ||
+    providerRaw === "other"
+      ? providerRaw
+      : undefined;
+
+  await putProjectBuildSecret(projectKey, {
+    name,
+    value,
+    kind,
+    provider,
+  });
+
+  await updateIssueRequirements(runId, issueId, [
+    {
+      id: requirementId,
+      status: "resolved",
+      resolved_at: new Date().toISOString(),
+    },
+  ]);
+
+  try {
+    await dispatchWorkflow(runId, "phase3-issue-execution", { issueId });
+  } catch (error) {
+    if (!isActiveExecutionConflict(error)) {
+      throw error;
+    }
+  }
+
+  revalidateRunPaths(runId);
+  redirect(withNavigationNonce(returnTo));
+}
+
+export async function answerIssueContextQuestionAction(formData: FormData) {
+  const runId = String(formData.get("run_id") ?? "").trim();
+  const issueId = String(formData.get("issue_id") ?? "").trim();
+  const questionId = String(formData.get("question_id") ?? "").trim();
+  const answer = String(formData.get("answer") ?? "").trim();
+  const returnTo = String(formData.get("return_to") ?? "").trim() || `/projects/${runId}/build`;
+
+  if (!runId || !issueId || !questionId || !answer) {
+    throw new Error("run_id, issue_id, question_id, and answer are required.");
+  }
+
+  await updateIssueContextQuestions(runId, issueId, [
+    {
+      id: questionId,
+      status: "answered",
+      answer,
+      answered_at: new Date().toISOString(),
+    },
+  ]);
+
+  try {
+    await dispatchWorkflow(runId, "phase3-issue-execution", { issueId });
+  } catch (error) {
+    if (!isActiveExecutionConflict(error)) {
+      throw error;
+    }
+  }
+
+  revalidateRunPaths(runId);
+  redirect(withNavigationNonce(returnTo));
 }

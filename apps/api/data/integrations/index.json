@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "connections": [
+    {
+      "provider": "github",
+      "status": "connected",
+      "connected_at": "2026-03-02T15:50:19.414Z",
+      "display_name": "MatteoTanziCodes",
+      "token_hint": "...krOp",
+      "validated_at": "2026-03-02T15:50:19.414Z"
+    },
+    {
+      "provider": "anthropic",
+      "status": "connected",
+      "connected_at": "2026-03-02T15:50:27.394Z",
+      "display_name": "Anthropic (stored, not validated)",
+      "token_hint": "...tgAA",
+      "validated_at": "2026-03-02T15:50:27.394Z"
+    },
+    {
+      "provider": "vercel",
+      "status": "connected",
+      "connected_at": "2026-03-02T15:52:42.498Z",
+      "display_name": "matteotanzicodes",
+      "token_hint": "...jqka",
+      "validated_at": "2026-03-02T15:52:42.498Z"
+    },
+    {
+      "provider": "stripe",
+      "status": "connected",
+      "connected_at": "2026-03-02T15:55:02.771Z",
+      "display_name": "matteo.beatstanzi@gmail.com",
+      "token_hint": "...eRqa",
+      "validated_at": "2026-03-02T15:55:02.771Z"
+    }
+  ]
+}

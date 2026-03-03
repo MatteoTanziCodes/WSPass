@@ -16,6 +16,10 @@ import {
   generateArchitectureAssistantReply,
   refineArchitecturePack,
 } from "../providers/llmClient";
+import {
+  LlmObservabilityRecorder,
+  withLlmObservabilityRecorder,
+} from "../lib/llmObservability";
 
 const RunDetailSchema = z
   .object({
@@ -188,9 +192,11 @@ function buildEffectiveRefinementMessages(messages: ChatMessage[]) {
 }
 
 export async function runArchitectureRefinementAgent(runId: string): Promise<void> {
+  const baseUrl = readRequiredEnv("PASS_API_BASE_URL");
+  const token = readRequiredEnv("PASS_API_TOKEN");
   const api = new PassApiClient({
-    baseUrl: readRequiredEnv("PASS_API_BASE_URL"),
-    token: readRequiredEnv("PASS_API_TOKEN"),
+    baseUrl,
+    token,
   });
 
   const githubRunId = process.env.GITHUB_RUN_ID ? Number(process.env.GITHUB_RUN_ID) : undefined;
@@ -198,6 +204,8 @@ export async function runArchitectureRefinementAgent(runId: string): Promise<voi
   let lastKnownChatState: z.infer<typeof ArchitectureChatStateSchema> | undefined;
   let lastKnownPack: z.infer<typeof ArchitecturePackSchema> | undefined;
   let fallbackAssistantReply: string | undefined;
+  let recorder: LlmObservabilityRecorder | undefined;
+  let sessionStatus: "running" | "succeeded" | "failed" = "running";
 
   try {
     const run = await api.getRun(runId);
@@ -213,6 +221,12 @@ export async function runArchitectureRefinementAgent(runId: string): Promise<voi
 
     lastKnownChatState = chatState;
     lastKnownPack = currentPack;
+    recorder = new LlmObservabilityRecorder({
+      runId,
+      workflowName: "phase1-architecture-refinement",
+      backend: run.execution?.backend,
+      model: process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6",
+    });
 
     await api.updateExecution(runId, {
       status: "running",
@@ -220,15 +234,19 @@ export async function runArchitectureRefinementAgent(runId: string): Promise<voi
       github_run_url: githubRunUrl,
     });
 
-    fallbackAssistantReply = await generateArchitectureAssistantReply({
-      currentPack,
-      messages: effectiveMessages,
-    });
+    fallbackAssistantReply = await withLlmObservabilityRecorder(recorder, () =>
+      generateArchitectureAssistantReply({
+        currentPack,
+        messages: effectiveMessages,
+      })
+    );
 
-    const refinementResult = await refineArchitecturePack({
-      currentPack,
-      messages: effectiveMessages,
-    });
+    const refinementResult = await withLlmObservabilityRecorder(recorder, () =>
+      refineArchitecturePack({
+        currentPack,
+        messages: effectiveMessages,
+      })
+    );
     const updatedPack = refinementResult.updatedPack;
 
     const nextChatState = ArchitectureChatStateSchema.parse({
@@ -288,21 +306,34 @@ export async function runArchitectureRefinementAgent(runId: string): Promise<voi
       github_run_id: Number.isFinite(githubRunId) ? githubRunId : undefined,
       github_run_url: githubRunUrl,
     });
+    sessionStatus = "succeeded";
   } catch (error) {
     const message = buildFailureMessage(error);
+    sessionStatus = "failed";
     if (lastKnownChatState && lastKnownPack) {
+      const safeChatState = lastKnownChatState;
+      const safePack = lastKnownPack;
       try {
         const fallbackReply =
           fallbackAssistantReply ??
-          (await generateArchitectureAssistantReply({
-            currentPack: lastKnownPack,
-            messages: buildEffectiveRefinementMessages(lastKnownChatState.messages),
-          }));
+          (await withLlmObservabilityRecorder(
+            recorder ??
+              new LlmObservabilityRecorder({
+                runId,
+                workflowName: "phase1-architecture-refinement",
+                model: process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6",
+              }),
+            () =>
+              generateArchitectureAssistantReply({
+                currentPack: safePack,
+                messages: buildEffectiveRefinementMessages(safeChatState.messages),
+              })
+          ));
 
         const failureChatState = ArchitectureChatStateSchema.parse({
           updated_at: new Date().toISOString(),
           messages: [
-            ...lastKnownChatState.messages,
+            ...safeChatState.messages,
             {
               id: `assistant_${Date.now()}`,
               role: "assistant",
@@ -344,5 +375,14 @@ export async function runArchitectureRefinementAgent(runId: string): Promise<voi
     }
 
     throw error;
+  } finally {
+    if (recorder) {
+      recorder.complete(sessionStatus);
+      try {
+        await recorder.flush({ baseUrl, token });
+      } catch {
+        // Preserve the primary workflow result if observability flush fails.
+      }
+    }
   }
 }

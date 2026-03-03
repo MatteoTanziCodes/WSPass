@@ -3,11 +3,11 @@ export function StatusBadge(props: { label: string; tone?: "default" | "accent" 
 
   const toneClass =
     tone === "accent"
-      ? "border-[color:var(--accent)] text-[color:var(--accent)]"
+      ? "border-[color:var(--warning)] text-[color:var(--warning-ink)] bg-[color:var(--warning-soft)]"
       : tone === "danger"
-      ? "border-[#aa3d3d] text-[#ff7d7d]"
+      ? "border-[color:var(--danger)] text-[color:var(--danger-ink)] bg-[color:var(--danger-soft)]"
       : tone === "success"
-      ? "border-[#2a8b56] text-[#7cf0a2]"
+      ? "border-[color:var(--success)] text-[color:var(--success-ink)] bg-[color:var(--success-soft)]"
       : "border-[color:var(--line)] text-[color:var(--ink)]";
 
   return (

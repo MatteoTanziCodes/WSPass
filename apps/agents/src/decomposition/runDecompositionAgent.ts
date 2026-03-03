@@ -13,6 +13,10 @@ import {
   RunStepSchema,
 } from "@pass/shared";
 import { generateDecompositionPlan } from "../providers/llmClient";
+import {
+  LlmObservabilityRecorder,
+  withLlmObservabilityRecorder,
+} from "../lib/llmObservability";
 
 const RunDetailSchema = z
   .object({
@@ -168,15 +172,26 @@ export function renderSummary(plan: z.infer<typeof DecompositionPlanSchema>) {
 }
 
 export async function runDecompositionAgent(runId: string): Promise<void> {
+  const baseUrl = readRequiredEnv("PASS_API_BASE_URL");
+  const token = readRequiredEnv("PASS_API_TOKEN");
   const api = new PassApiClient({
-    baseUrl: readRequiredEnv("PASS_API_BASE_URL"),
-    token: readRequiredEnv("PASS_API_TOKEN"),
+    baseUrl,
+    token,
   });
 
   const githubRunId = process.env.GITHUB_RUN_ID ? Number(process.env.GITHUB_RUN_ID) : undefined;
   const githubRunUrl = process.env.GITHUB_RUN_URL;
+  let recorder: LlmObservabilityRecorder | undefined;
+  let sessionStatus: "running" | "succeeded" | "failed" = "running";
 
   try {
+    const run = await api.getRun(runId);
+    recorder = new LlmObservabilityRecorder({
+      runId,
+      workflowName: "phase2-decomposition",
+      backend: run.execution?.backend,
+      model: process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6",
+    });
     await api.updateExecution(runId, {
       status: "running",
       github_run_id: Number.isFinite(githubRunId) ? githubRunId : undefined,
@@ -185,7 +200,9 @@ export async function runDecompositionAgent(runId: string): Promise<void> {
 
     const artifact = await api.getArtifact(runId, "architecture_pack");
     const pack = ArchitecturePackSchema.parse(artifact.payload);
-    const plan = await generateDecompositionPlan({ pack });
+    const plan = await withLlmObservabilityRecorder(recorder, () =>
+      generateDecompositionPlan({ pack })
+    );
 
     await api.uploadArtifact(runId, {
       name: "decomposition_plan",
@@ -224,8 +241,10 @@ export async function runDecompositionAgent(runId: string): Promise<void> {
       github_run_id: Number.isFinite(githubRunId) ? githubRunId : undefined,
       github_run_url: githubRunUrl,
     });
+    sessionStatus = "succeeded";
   } catch (error) {
     const message = buildFailureMessage(error);
+    sessionStatus = "failed";
     try {
       await api.updateExecution(runId, {
         status: "failed",
@@ -238,5 +257,14 @@ export async function runDecompositionAgent(runId: string): Promise<void> {
     }
 
     throw error;
+  } finally {
+    if (recorder) {
+      recorder.complete(sessionStatus);
+      try {
+        await recorder.flush({ baseUrl, token });
+      } catch {
+        // Preserve the primary workflow result if observability flush fails.
+      }
+    }
   }
 }

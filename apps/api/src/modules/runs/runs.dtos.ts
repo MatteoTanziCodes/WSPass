@@ -2,6 +2,10 @@ import { z } from "zod";
 import { ArtifactMetadataSchema, RunDetailSchema, RunRecordSchema } from "./runs.schemas";
 import {
   ArchitectureChatStateSchema,
+  BuildOrchestrationStateSchema,
+  IssueContextQuestionSchema,
+  IssueExecutionStateSchema,
+  ProjectSecretRequirementSchema,
   DecompositionReviewQuestionAnswerRequestSchema,
   DecompositionReviewStateSchema,
   DecompositionStateSchema,
@@ -29,6 +33,7 @@ export const RunListItemSchema = RunRecordSchema.extend({
   repo_state: RepoStateSchema.optional(),
   decomposition_state: DecompositionStateSchema.optional(),
   decomposition_review_state: DecompositionReviewStateSchema.optional(),
+  build_state: BuildOrchestrationStateSchema.optional(),
 }).strict();
 
 // Response will include an array of run records
@@ -76,10 +81,23 @@ export const DispatchRunResponseSchema = z
   })
   .strict();
 
+export const DispatchRunRequestSchema = z
+  .object({
+    issue_id: z.string().min(1).optional(),
+  })
+  .strict();
+
 export const DispatchRunParamsSchema = z
   .object({
     runId: z.uuid(),
     workflowName: WorkflowNameSchema,
+  })
+  .strict();
+
+export const IssueExecutionParamsSchema = z
+  .object({
+    runId: z.uuid(),
+    issueId: z.string().min(1),
   })
   .strict();
 
@@ -124,10 +142,31 @@ export const GetArtifactParamsSchema = z
   })
   .strict();
 
+export const GetRunLogParamsSchema = z
+  .object({
+    runId: z.uuid(),
+    logName: z.string().min(1),
+  })
+  .strict();
+
 export const GetArtifactResponseSchema = z
   .object({
     artifact: ArtifactMetadataSchema,
     payload: z.union([z.string(), z.record(z.string(), z.unknown()), z.array(z.unknown())]),
+  })
+  .strict();
+
+export const ListRunLogsResponseSchema = z
+  .object({
+    logs: z.array(
+      z
+        .object({
+          name: z.string().min(1),
+          size_bytes: z.number().int().nonnegative(),
+          updated_at: z.string().datetime(),
+        })
+        .strict()
+    ),
   })
   .strict();
 
@@ -175,6 +214,59 @@ export const AnswerDecompositionReviewQuestionRequestSchema =
   DecompositionReviewQuestionAnswerRequestSchema;
 
 export const AnswerDecompositionReviewQuestionResponseSchema = z
+  .object({
+    run: RunDetailSchema,
+  })
+  .strict();
+
+export const UpdateBuildStateRequestSchema = BuildOrchestrationStateSchema;
+
+export const UpdateBuildStateResponseSchema = z
+  .object({
+    run: RunDetailSchema,
+  })
+  .strict();
+
+export const UpdateIssueExecutionStateRequestSchema = IssueExecutionStateSchema;
+
+export const UpdateIssueExecutionStateResponseSchema = z
+  .object({
+    run: RunDetailSchema,
+  })
+  .strict();
+
+export const UpdateIssueRequirementsRequestSchema = z
+  .object({
+    requirements: z.array(
+      ProjectSecretRequirementSchema.pick({
+        id: true,
+        status: true,
+        resolved_at: true,
+      })
+    ),
+  })
+  .strict();
+
+export const UpdateIssueRequirementsResponseSchema = z
+  .object({
+    run: RunDetailSchema,
+  })
+  .strict();
+
+export const UpdateIssueContextQuestionsRequestSchema = z
+  .object({
+    questions: z.array(
+      IssueContextQuestionSchema.pick({
+        id: true,
+        status: true,
+        answer: true,
+        answered_at: true,
+      })
+    ),
+  })
+  .strict();
+
+export const UpdateIssueContextQuestionsResponseSchema = z
   .object({
     run: RunDetailSchema,
   })
