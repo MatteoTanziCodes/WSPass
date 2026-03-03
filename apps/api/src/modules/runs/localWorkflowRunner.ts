@@ -10,6 +10,10 @@ type DispatchLocalWorkflowInput = {
   issueId?: string;
 };
 
+function sanitizeLogToken(value: string) {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, "_");
+}
+
 const workflowCliMap: Record<WorkflowName, string> = {
   "phase1-planner": "planner",
   "phase1-architecture-refinement": "architectureRefinement",
@@ -107,7 +111,10 @@ export class LocalWorkflowRunner {
     const { command, args } = resolveCommand(input.workflowName);
     const logsDir = path.join(root, "runs", input.runId, "logs");
     fs.mkdirSync(logsDir, { recursive: true });
-    const logPath = path.join(logsDir, `${input.workflowName}.log`);
+    const logFileName = input.issueId
+      ? `${input.workflowName}--${sanitizeLogToken(input.issueId)}.log`
+      : `${input.workflowName}.log`;
+    const logPath = path.join(logsDir, logFileName);
     const logFd = fs.openSync(logPath, "a");
     fs.writeFileSync(
       logFd,
@@ -138,10 +145,23 @@ export class LocalWorkflowRunner {
       );
     }
 
+    fs.appendFileSync(
+      logPath,
+      `[${new Date().toISOString()}] spawned pid=${child.pid}${input.issueId ? ` issue_id=${input.issueId}` : ""}\n`
+    );
+
     child.on("error", (error) => {
       void this.handleChildFailure(input, logPath, `Local workflow process error: ${error.message}`);
     });
     child.on("exit", (code, signal) => {
+      try {
+        const exitSummary = signal
+          ? `Local workflow exited via signal ${signal}`
+          : `Local workflow exited with code ${code ?? 0}`;
+        fs.appendFileSync(logPath, `[${new Date().toISOString()}] ${exitSummary}\n`);
+      } catch {
+        // Ignore best-effort exit logging failures.
+      }
       if (code && code !== 0) {
         const failureReason = signal
           ? `Local workflow exited via signal ${signal}`
@@ -191,6 +211,10 @@ export class LocalWorkflowRunner {
           blocked_reason: reason,
           summary: reason,
           audit_artifact_name: currentBuildState?.audit_artifact_name,
+        });
+        await this.runStore.updateRun(input.runId, {
+          status: "failed",
+          current_step: "build",
         });
       }
     } catch {

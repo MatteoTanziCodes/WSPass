@@ -58,8 +58,10 @@ export const IssueContextQuestionSchema = z
     rationale: z.string().min(1),
     status: z.enum(["open", "answered", "resolved"]),
     answer: z.string().min(1).optional(),
+    agent_response: z.string().min(1).optional(),
     created_at: z.string().datetime(),
     answered_at: z.string().datetime().optional(),
+    resolved_at: z.string().datetime().optional(),
     related_requirement_ids: z.array(z.string().min(1)).default([]),
     related_components: z.array(z.string().min(1)).default([]),
   })

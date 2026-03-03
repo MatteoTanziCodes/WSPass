@@ -39,6 +39,10 @@ function summarizeError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function logIssue(issueId: string, message: string) {
+  console.log(`[issue-execution][${issueId}] ${message}`);
+}
+
 function containsToken(text: string, token: string) {
   return text.toLowerCase().includes(token.toLowerCase());
 }
@@ -152,6 +156,23 @@ function detectContextQuestions(input: {
   return questions;
 }
 
+function buildContextQuestionResponse(input: {
+  question: IssueContextQuestion;
+  workItem: DecompositionPlan["work_items"][number];
+}) {
+  const answer = input.question.answer?.trim();
+  if (!answer) {
+    return `Acknowledged. I will continue issue execution for "${input.workItem.title}" using the supplied clarification.`;
+  }
+
+  return [
+    `Got it — I will continue "${input.workItem.title}" using this clarification:`,
+    answer,
+    "",
+    "If another ambiguity appears during implementation, I will raise a new issue-context question here.",
+  ].join("\n");
+}
+
 function updateIssueInBuildState(
   buildState: BuildOrchestrationState,
   issueId: string,
@@ -169,16 +190,15 @@ async function persistIssueState(
   buildState: BuildOrchestrationState,
   issueState: IssueExecutionState
 ) {
-  const nextBuildState = updateIssueInBuildState(buildState, issueState.issue_id, () => issueState);
-  await api.updateIssueExecutionState(runId, issueState.issue_id, issueState);
-  await api.updateBuildState(runId, nextBuildState);
-  return nextBuildState;
+  const updated = await api.updateIssueExecutionState(runId, issueState.issue_id, issueState);
+  return BuildOrchestrationStateSchema.parse(updated.run.build_state ?? buildState);
 }
 
 function withAttempt(
   issue: IssueExecutionState,
   patch: Partial<IssueExecutionState> & { status: IssueExecutionState["status"]; summary?: string }
 ) {
+  const { summary, ...issuePatch } = patch;
   const attempt = IssueExecutionAttemptSchema.parse({
     attempt_number: issue.current_attempt,
     started_at: issue.attempts.at(-1)?.started_at ?? now(),
@@ -189,7 +209,7 @@ function withAttempt(
         ? undefined
         : now(),
     status: patch.status,
-    summary: patch.summary ?? issue.attempts.at(-1)?.summary ?? `Issue state: ${patch.status}`,
+    summary: summary ?? issue.attempts.at(-1)?.summary ?? `Issue state: ${patch.status}`,
     log_artifact_names: issue.attempts.at(-1)?.log_artifact_names ?? [],
     llm_observability_artifact_name: issue.attempts.at(-1)?.llm_observability_artifact_name,
     quality_result: issue.attempts.at(-1)?.quality_result,
@@ -198,7 +218,7 @@ function withAttempt(
 
   return IssueExecutionStateSchema.parse({
     ...issue,
-    ...patch,
+    ...issuePatch,
     attempts: [...issue.attempts.slice(0, Math.max(issue.attempts.length - 1, 0)), attempt],
     last_updated_at: now(),
   });
@@ -239,6 +259,7 @@ async function writeExecutionArtifacts(input: {
 }
 
 export async function runIssueExecutionAgent(runId: string, issueId: string): Promise<void> {
+  logIssue(issueId, `starting issue worker for run ${runId}`);
   const api = new BuildApiClient();
   const projectBuild = new ProjectBuildClient();
   const worktreeManager = new WorktreeManager();
@@ -260,6 +281,7 @@ export async function runIssueExecutionAgent(runId: string, issueId: string): Pr
   if (!workItem) {
     throw new Error(`Issue ${issueId} was not found in the decomposition plan.`);
   }
+  logIssue(issueId, `loaded decomposition work item "${workItem.title}"`);
 
   const projectKey = deriveProjectKeyFromRun(run);
   const projectConfig = ProjectBuildConfigSchema.parse(await projectBuild.getConfig(projectKey));
@@ -271,6 +293,7 @@ export async function runIssueExecutionAgent(runId: string, issueId: string): Pr
     summary: `Gathering requirements for ${workItem.title}.`,
   });
   currentBuildState = await persistIssueState(api, runId, currentBuildState, issueState);
+  logIssue(issueId, "persisted gathering_requirements state");
 
   const secrets = await projectBuild.listSecrets(projectKey);
   const existingSecretNames = new Set(secrets.map((secret) => secret.name));
@@ -292,6 +315,7 @@ export async function runIssueExecutionAgent(runId: string, issueId: string): Pr
     hasGitHubIntegration,
   });
   if (requirements.length > 0) {
+    logIssue(issueId, `blocking for ${requirements.length} missing secret or integration requirement(s)`);
     issueState = IssueExecutionStateSchema.parse({
       ...issueState,
       status: "blocked_missing_tools",
@@ -304,11 +328,59 @@ export async function runIssueExecutionAgent(runId: string, issueId: string): Pr
   }
 
   const existingOpenQuestions = issueState.context_questions.filter((question) => question.status === "open");
-  const contextQuestions = existingOpenQuestions.length > 0 ? existingOpenQuestions : detectContextQuestions({
-    issue: issueState,
-    workItem,
-  });
+  if (existingOpenQuestions.length > 0) {
+    logIssue(issueId, `blocking for ${existingOpenQuestions.length} existing open context question(s)`);
+    issueState = IssueExecutionStateSchema.parse({
+      ...issueState,
+      status: "blocked_missing_context",
+      context_questions: issueState.context_questions,
+      blocker_summary: existingOpenQuestions[0]?.prompt,
+      last_updated_at: now(),
+    });
+    await persistIssueState(api, runId, currentBuildState, issueState);
+    return;
+  }
+
+  const answeredQuestions = issueState.context_questions.filter(
+    (question) => question.status === "answered" && question.answer?.trim()
+  );
+
+  if (answeredQuestions.length > 0) {
+    logIssue(issueId, `consuming ${answeredQuestions.length} answered context question(s)`);
+    issueState = IssueExecutionStateSchema.parse({
+      ...issueState,
+      context_questions: issueState.context_questions.map((question) => {
+        if (!answeredQuestions.some((candidate) => candidate.id === question.id)) {
+          return question;
+        }
+
+        return {
+          ...question,
+          status: "resolved",
+          resolved_at: now(),
+          agent_response: buildContextQuestionResponse({
+            question,
+            workItem,
+          }),
+        };
+      }),
+      blocker_summary: undefined,
+      last_updated_at: now(),
+    });
+    currentBuildState = await persistIssueState(api, runId, currentBuildState, issueState);
+  }
+
+  const hasResolvedContext = issueState.context_questions.some(
+    (question) => question.status === "resolved"
+  );
+  const contextQuestions = hasResolvedContext
+    ? []
+    : detectContextQuestions({
+        issue: issueState,
+        workItem,
+      });
   if (contextQuestions.length > 0) {
+    logIssue(issueId, `raising ${contextQuestions.length} new context question(s)`);
     issueState = IssueExecutionStateSchema.parse({
       ...issueState,
       status: "blocked_missing_context",
@@ -339,16 +411,20 @@ export async function runIssueExecutionAgent(runId: string, issueId: string): Pr
     slug: slugify(workItem.title),
     token: githubToken,
   });
+  logIssue(issueId, `prepared worktree ${prepared.worktreePath} on branch ${prepared.branchName}`);
 
   const scripts = await worktreeManager.readPackageJsonScripts(prepared.clonePath);
   const qualityCommands = inferQualityCommands(scripts, projectConfig.quality_commands);
-  await ensurePolicyFiles({
-    worktreeManager,
-    clonePath: prepared.clonePath,
-    defaultBranch: prepared.defaultBranch,
-    repositoryBranchName: prepared.defaultBranch,
-    config: qualityCommands,
+  await worktreeManager.withProjectGitLock(projectKey, async () => {
+    await ensurePolicyFiles({
+      worktreeManager,
+      clonePath: prepared.clonePath,
+      defaultBranch: prepared.defaultBranch,
+      repositoryBranchName: prepared.defaultBranch,
+      config: qualityCommands,
+    });
   });
+  logIssue(issueId, "ensured repo policy files");
 
   const context = buildIssueExecutionContext({
     issueId,
@@ -364,6 +440,7 @@ export async function runIssueExecutionAgent(runId: string, issueId: string): Pr
     path.join(".wspass", "issues", issueId, "context.json"),
     JSON.stringify(context, null, 2)
   );
+  logIssue(issueId, "wrote per-issue execution context artifacts into worktree");
   await worktreeManager.writeFile(
     prepared.worktreePath,
     path.join(".wspass", "issues", issueId, "implementation-plan.md"),
@@ -407,7 +484,9 @@ export async function runIssueExecutionAgent(runId: string, issueId: string): Pr
     last_updated_at: now(),
   });
   currentBuildState = await persistIssueState(api, runId, currentBuildState, issueState);
+  logIssue(issueId, "issue moved to working state");
 
+  logIssue(issueId, "running local build policy and quality commands");
   const qualityResult = await runBuildPolicy({
     repoPath: prepared.worktreePath,
     branchName: prepared.branchName,
@@ -415,14 +494,18 @@ export async function runIssueExecutionAgent(runId: string, issueId: string): Pr
     workflowName: "phase3-issue-execution",
     config: qualityCommands,
   });
+  logIssue(issueId, `build policy completed with status=${qualityResult.status}`);
 
+  logIssue(issueId, "committing and pushing branch if changes exist");
   const pushed = await worktreeManager.commitAndPushIfChanged({
     repoPath: prepared.worktreePath,
     branchName: prepared.branchName,
     message: `chore(agent): scaffold execution for ${issueState.issue_number ? `#${issueState.issue_number}` : issueId}`,
   });
+  logIssue(issueId, pushed ? "changes pushed to remote branch" : "no code changes were generated to push");
 
   if (qualityResult.status !== "passed") {
+    logIssue(issueId, `commit blocked by policy: ${qualityResult.summary}`);
     issueState = IssueExecutionStateSchema.parse({
       ...issueState,
       status: "commit_blocked",
@@ -475,11 +558,12 @@ export async function runIssueExecutionAgent(runId: string, issueId: string): Pr
   }
 
   const prClient = new GitHubPullRequestsClient({ repository: repository.repository, token: githubToken });
+  logIssue(issueId, "checking for existing pull request");
   const existingPr = await prClient.findOpenPullRequest(prepared.branchName);
   const pullRequest =
     existingPr ??
     (pushed
-      ? await prClient.createDraftPullRequest({
+      ? await prClient.createPullRequest({
           title: issueState.issue_number
             ? `[WSPass] #${issueState.issue_number} ${issueState.title}`
             : `[WSPass] ${issueState.title}`,
@@ -493,8 +577,12 @@ export async function runIssueExecutionAgent(runId: string, issueId: string): Pr
           ].join("\n"),
           head: prepared.branchName,
           base: prepared.defaultBranch,
+          draft: false,
         })
       : null);
+  if (pullRequest) {
+    logIssue(issueId, `pull request ready: #${pullRequest.number}`);
+  }
 
   issueState = IssueExecutionStateSchema.parse({
     ...issueState,
@@ -520,7 +608,7 @@ export async function runIssueExecutionAgent(runId: string, issueId: string): Pr
         completed_at: now(),
         status: pullRequest ? "pr_open" : "ready",
         summary: pullRequest
-          ? `Opened draft PR ${pullRequest.number} for ${issueState.title}.`
+          ? `Opened PR ${pullRequest.number} for ${issueState.title}.`
           : `Prepared issue context for ${issueState.title}; no code changes were generated.`,
         log_artifact_names: [],
         quality_result: {
@@ -550,4 +638,5 @@ export async function runIssueExecutionAgent(runId: string, issueId: string): Pr
     repoPath: prepared.worktreePath,
   });
   await persistIssueState(api, runId, currentBuildState, issueState);
+  logIssue(issueId, `issue execution completed with status=${issueState.status}`);
 }

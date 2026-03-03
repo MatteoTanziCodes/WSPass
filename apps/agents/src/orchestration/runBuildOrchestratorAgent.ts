@@ -27,6 +27,10 @@ function summarizeError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function logBuild(runId: string, message: string) {
+  console.log(`[build-orchestrator][${runId}] ${message}`);
+}
+
 function deriveRings(plan: DecompositionPlan) {
   const workItemsById = new Map(plan.work_items.map((item) => [item.id, item]));
   const remaining = new Set(plan.work_items.map((item) => item.id));
@@ -235,6 +239,7 @@ function nextRunnableIssues(buildState: BuildOrchestrationState) {
 }
 
 export async function runBuildOrchestratorAgent(runId: string): Promise<void> {
+  logBuild(runId, "starting build orchestrator");
   const api = new BuildApiClient();
   const githubRunId = process.env.GITHUB_RUN_ID ? Number(process.env.GITHUB_RUN_ID) : undefined;
   const githubRunUrl = process.env.GITHUB_RUN_URL;
@@ -257,6 +262,7 @@ export async function runBuildOrchestratorAgent(runId: string): Promise<void> {
     }
 
     const plan = await api.getDecompositionPlan(runId);
+    logBuild(runId, `loaded run, repo state, and decomposition plan with ${plan.work_items.length} work item(s)`);
     let buildState = BuildOrchestrationStateSchema.parse({
       status: "planning",
       started_at: run.build_state?.started_at ?? now(),
@@ -271,10 +277,12 @@ export async function runBuildOrchestratorAgent(runId: string): Promise<void> {
     latestBuildState = buildState;
     await api.updateBuildState(runId, buildState);
     await api.updateRun(runId, { current_step: "build" });
+    logBuild(runId, `planned build orchestration with ${buildState.issues.length} tracked issue(s)`);
 
     while (true) {
       const runnable = nextRunnableIssues(buildState);
       if (!runnable.length) {
+        logBuild(runId, "no more immediately runnable issues");
         break;
       }
 
@@ -287,23 +295,33 @@ export async function runBuildOrchestratorAgent(runId: string): Promise<void> {
       buildState = await persistBuildAudit(api, runId, buildState);
       latestBuildState = buildState;
       await api.updateBuildState(runId, buildState);
+      logBuild(
+        runId,
+        `dispatching ring ${runnable[0].ring + 1} with ${runnable.length} issue worker(s): ${runnable.map((issue) => issue.issue_id).join(", ")}`
+      );
 
-      for (const issue of runnable) {
-        await runIssueExecutionAgent(runId, issue.issue_id);
-        const refreshed = await api.getRun(runId);
-        buildState = BuildOrchestrationStateSchema.parse(
-          refreshed.run.build_state ?? buildState
+      await Promise.all(runnable.map((issue) => runIssueExecutionAgent(runId, issue.issue_id)));
+      let refreshed = await api.getRun(runId);
+      buildState = BuildOrchestrationStateSchema.parse(refreshed.run.build_state ?? buildState);
+      latestBuildState = buildState;
+
+      const issuesNeedingSupervisor = buildState.issues.filter(
+        (issue) =>
+          runnable.some((candidate) => candidate.issue_id === issue.issue_id) &&
+          (issue.status === "pr_open" || issue.status === "testing")
+      );
+
+      if (issuesNeedingSupervisor.length > 0) {
+        logBuild(
+          runId,
+          `running PR supervisor for ${issuesNeedingSupervisor.length} issue(s): ${issuesNeedingSupervisor.map((issue) => issue.issue_id).join(", ")}`
         );
+        await Promise.all(
+          issuesNeedingSupervisor.map((issue) => runPrSupervisorAgent(runId, issue.issue_id))
+        );
+        refreshed = await api.getRun(runId);
+        buildState = BuildOrchestrationStateSchema.parse(refreshed.run.build_state ?? buildState);
         latestBuildState = buildState;
-        const refreshedIssue = buildState.issues.find((item) => item.issue_id === issue.issue_id);
-        if (refreshedIssue?.status === "pr_open" || refreshedIssue?.status === "testing") {
-          await runPrSupervisorAgent(runId, issue.issue_id);
-          const afterSupervisor = await api.getRun(runId);
-          buildState = BuildOrchestrationStateSchema.parse(
-            afterSupervisor.run.build_state ?? buildState
-          );
-          latestBuildState = buildState;
-        }
       }
     }
 
@@ -315,6 +333,7 @@ export async function runBuildOrchestratorAgent(runId: string): Promise<void> {
     const remainingQueued = buildState.issues.filter((issue) => issue.status === "queued");
 
     if (mergedCount === buildState.issues.length && buildState.issues.length > 0) {
+      logBuild(runId, "all issue PRs merged successfully; marking build complete");
       buildState = BuildOrchestrationStateSchema.parse({
         ...buildState,
         status: "completed",
@@ -330,6 +349,10 @@ export async function runBuildOrchestratorAgent(runId: string): Promise<void> {
         current_step: "build",
       });
     } else if (blockedIssues.length > 0 || failedIssues.length > 0 || remainingQueued.length > 0) {
+      logBuild(
+        runId,
+        `build cannot progress automatically: blocked=${blockedIssues.length} failed=${failedIssues.length} queued=${remainingQueued.length}`
+      );
       const blockedReason =
         blockedIssues[0]?.blocker_summary ??
         failedIssues[0]?.blocker_summary ??
@@ -354,8 +377,10 @@ export async function runBuildOrchestratorAgent(runId: string): Promise<void> {
       github_run_id: Number.isFinite(githubRunId) ? githubRunId : undefined,
       github_run_url: githubRunUrl,
     });
+    logBuild(runId, "build orchestrator completed successfully");
   } catch (error) {
     const message = summarizeError(error);
+    logBuild(runId, `build orchestrator failed: ${message}`);
     if (latestBuildState) {
       try {
         const failedBuildState = await persistBuildAudit(
@@ -372,6 +397,14 @@ export async function runBuildOrchestratorAgent(runId: string): Promise<void> {
       } catch {
         // Best effort only; the execution failure still needs to surface.
       }
+    }
+    try {
+      await api.updateRun(runId, {
+        status: "failed",
+        current_step: "build",
+      });
+    } catch {
+      // Best effort only; execution/build-state failure should still surface.
     }
     await api.updateExecution(runId, {
       status: "failed",

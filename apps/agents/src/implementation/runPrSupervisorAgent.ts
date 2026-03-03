@@ -1,4 +1,4 @@
-import { BuildOrchestrationStateSchema, IssueExecutionAttemptSchema, IssueExecutionStateSchema } from "@pass/shared";
+import { IssueExecutionAttemptSchema, IssueExecutionStateSchema } from "@pass/shared";
 import { BuildApiClient } from "../lib/buildApiClient";
 import { GitHubPullRequestsClient } from "./githubPullRequestsClient";
 import { resolveIntegrationToken } from "../lib/integrationTokens";
@@ -11,7 +11,20 @@ function summarizeError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function canRetryDraftPromotion(error: unknown) {
+  const message = summarizeError(error);
+  return (
+    message.includes("/ready_for_review") &&
+    (message.includes(" 404:") || message.includes(" 405:") || message.includes(" 422:"))
+  );
+}
+
+function logPr(runId: string, issueId: string, message: string) {
+  console.log(`[pr-supervisor][${runId}][${issueId}] ${message}`);
+}
+
 export async function runPrSupervisorAgent(runId: string, issueId: string) {
+  logPr(runId, issueId, "starting PR supervision");
   const api = new BuildApiClient();
   const runEnvelope = await api.getRun(runId);
   const run = runEnvelope.run;
@@ -28,6 +41,7 @@ export async function runPrSupervisorAgent(runId: string, issueId: string) {
     throw new Error("Resolved repository is required for PR supervision.");
   }
   if (!issue.pull_request.pr_number || !issue.branch_name) {
+    logPr(runId, issueId, "skipping PR supervision because no PR is attached yet");
     return issue;
   }
 
@@ -54,16 +68,71 @@ export async function runPrSupervisorAgent(runId: string, issueId: string) {
     let failureSummary: string | undefined;
 
     if (pr.merged_at) {
+      logPr(runId, issueId, `PR #${issue.pull_request.pr_number} is already merged`);
       nextStatus = "merged";
       prStatus = "merged";
     } else if (failingChecks.length > 0) {
+      logPr(runId, issueId, `PR #${issue.pull_request.pr_number} has failing checks: ${failingChecks.join(", ")}`);
       nextStatus = "fixing";
       prStatus = "checks_failed";
       failureSummary = `Failing checks: ${failingChecks.join(", ")}`;
     } else if (pendingChecks) {
+      logPr(runId, issueId, `PR #${issue.pull_request.pr_number} still has pending checks`);
       nextStatus = "testing";
       prStatus = "checks_running";
     } else {
+      if (pr.draft) {
+        logPr(runId, issueId, `promoting draft PR #${issue.pull_request.pr_number} to ready-for-review`);
+        try {
+          await prClient.readyForReview(issue.pull_request.pr_number);
+        } catch (error) {
+          if (!canRetryDraftPromotion(error)) {
+            throw error;
+          }
+
+          logPr(runId, issueId, `draft promotion failed for PR #${issue.pull_request.pr_number}; recreating as non-draft`);
+          await prClient.closePullRequest(issue.pull_request.pr_number);
+          const replacementPr = await prClient.createPullRequest({
+            title: pr.title ?? issue.title,
+            body: pr.body ?? `Automated PR for ${issue.title}.`,
+            head: issue.branch_name,
+            base: pr.base.ref,
+            draft: false,
+          });
+
+          const nextIssue = IssueExecutionStateSchema.parse({
+            ...issue,
+            status: "testing",
+            blocker_summary: undefined,
+            pull_request: {
+              ...issue.pull_request,
+              pr_number: replacementPr.number,
+              pr_url: replacementPr.html_url,
+              status: "checks_running",
+              failing_checks: [],
+              failure_summary: undefined,
+              last_updated_at: now(),
+            },
+            attempts: [
+              ...issue.attempts,
+              IssueExecutionAttemptSchema.parse({
+                attempt_number: issue.current_attempt,
+                started_at: now(),
+                completed_at: now(),
+                status: "testing",
+                summary: `Replaced draft PR #${issue.pull_request.pr_number} with PR #${replacementPr.number} and resumed checks.`,
+                log_artifact_names: [],
+              }),
+            ],
+            last_updated_at: now(),
+          });
+
+          await api.updateIssueExecutionState(runId, issueId, nextIssue);
+          logPr(runId, issueId, `replacement PR #${replacementPr.number} created and issue returned to testing`);
+          return nextIssue;
+        }
+      }
+      logPr(runId, issueId, `merging PR #${issue.pull_request.pr_number}`);
       await prClient.mergePullRequest(issue.pull_request.pr_number);
       nextStatus = "merged";
       prStatus = "merged";
@@ -100,16 +169,12 @@ export async function runPrSupervisorAgent(runId: string, issueId: string) {
       last_updated_at: now(),
     });
 
-    const nextBuildState = BuildOrchestrationStateSchema.parse({
-      ...buildState,
-      issues: buildState.issues.map((item) => (item.issue_id === issueId ? nextIssue : item)),
-    });
-
     await api.updateIssueExecutionState(runId, issueId, nextIssue);
-    await api.updateBuildState(runId, nextBuildState);
+    logPr(runId, issueId, `PR supervision finished with issue status=${nextIssue.status}`);
     return nextIssue;
   } catch (error) {
     const message = summarizeError(error);
+    logPr(runId, issueId, `PR supervision failed: ${message}`);
     const nextIssue = IssueExecutionStateSchema.parse({
       ...issue,
       status: "failed",
@@ -134,12 +199,7 @@ export async function runPrSupervisorAgent(runId: string, issueId: string) {
       ],
       last_updated_at: now(),
     });
-    const nextBuildState = BuildOrchestrationStateSchema.parse({
-      ...buildState,
-      issues: buildState.issues.map((item) => (item.issue_id === issueId ? nextIssue : item)),
-    });
     await api.updateIssueExecutionState(runId, issueId, nextIssue);
-    await api.updateBuildState(runId, nextBuildState);
     throw error;
   }
 }

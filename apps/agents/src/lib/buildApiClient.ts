@@ -61,6 +61,12 @@ const ArtifactResponseSchema = z
   })
   .strict();
 
+const RunMutationResponseSchema = z
+  .object({
+    run: RunDetailSchema,
+  })
+  .strict();
+
 function readRequiredEnv(name: string) {
   const value = process.env[name];
   if (!value) {
@@ -134,11 +140,13 @@ export class BuildApiClient {
   }
 
   async updateBuildState(runId: string, state: BuildOrchestrationState) {
-    return this.request("PATCH", `/runs/${runId}/build-state`, state);
+    const json = await this.request("PATCH", `/runs/${runId}/build-state`, state);
+    return RunMutationResponseSchema.parse(json);
   }
 
   async updateIssueExecutionState(runId: string, issueId: string, state: IssueExecutionState) {
-    return this.request("PATCH", `/runs/${runId}/issues/${issueId}/state`, state);
+    const json = await this.request("PATCH", `/runs/${runId}/issues/${issueId}/state`, state);
+    return RunMutationResponseSchema.parse(json);
   }
 
   async dispatchWorkflow(
@@ -161,7 +169,10 @@ export class BuildApiClient {
     issueId: string,
     requirements: Array<{ id: string; status: "open" | "provided" | "resolved"; resolved_at?: string }>
   ) {
-    return this.request("PATCH", `/runs/${runId}/issues/${issueId}/requirements`, { requirements });
+    const json = await this.request("PATCH", `/runs/${runId}/issues/${issueId}/requirements`, {
+      requirements,
+    });
+    return RunMutationResponseSchema.parse(json);
   }
 
   async answerIssueContextQuestions(
@@ -169,7 +180,10 @@ export class BuildApiClient {
     issueId: string,
     questions: Array<{ id: string; status: "open" | "answered" | "resolved"; answer?: string; answered_at?: string }>
   ) {
-    return this.request("PATCH", `/runs/${runId}/issues/${issueId}/context-questions`, { questions });
+    const json = await this.request("PATCH", `/runs/${runId}/issues/${issueId}/context-questions`, {
+      questions,
+    });
+    return RunMutationResponseSchema.parse(json);
   }
 
   private async request(method: string, path: string, body?: unknown, auth = true) {

@@ -4,9 +4,14 @@ type GitHubPullRequest = {
   number: number;
   html_url: string;
   state: "open" | "closed";
+  title?: string;
+  body?: string | null;
   draft?: boolean;
   mergeable_state?: string;
   merged_at?: string | null;
+  base: {
+    ref: string;
+  };
   head: {
     ref: string;
     sha: string;
@@ -47,18 +52,19 @@ export class GitHubPullRequestsClient {
     return pulls[0] ?? null;
   }
 
-  async createDraftPullRequest(input: {
+  async createPullRequest(input: {
     title: string;
     body: string;
     head: string;
     base: string;
+    draft?: boolean;
   }) {
     return this.request<GitHubPullRequest>("POST", "/pulls", {
       title: input.title,
       body: input.body,
       head: input.head,
       base: input.base,
-      draft: true,
+      draft: input.draft ?? false,
     });
   }
 
@@ -80,6 +86,16 @@ export class GitHubPullRequestsClient {
   async mergePullRequest(prNumber: number) {
     return this.request("PUT", `/pulls/${prNumber}/merge`, {
       merge_method: "squash",
+    });
+  }
+
+  async readyForReview(prNumber: number) {
+    return this.request("POST", `/pulls/${prNumber}/ready_for_review`);
+  }
+
+  async closePullRequest(prNumber: number) {
+    return this.request<GitHubPullRequest>("PATCH", `/pulls/${prNumber}`, {
+      state: "closed",
     });
   }
 

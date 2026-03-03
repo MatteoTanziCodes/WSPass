@@ -78,6 +78,13 @@ function buildWorkflowSummaryEntry(run: Awaited<ReturnType<typeof listRuns>>[num
     return null;
   }
 
+  if (
+    execution.workflow_name === "phase3-issue-execution" ||
+    execution.workflow_name === "phase3-pr-supervisor"
+  ) {
+    return null;
+  }
+
   const active = ACTIVE_EXECUTION_STATUSES.has(execution.status);
   const failed = execution.status === "failed";
   if (!active && !failed) {
@@ -199,6 +206,13 @@ function selectArtifactCandidates(entry: AgentEntry, availableNames: Set<string>
   return candidates.find((candidate) => availableNames.has(candidate));
 }
 
+function expectedLogNameForEntry(entry: AgentEntry) {
+  if (entry.kind === "issue" && entry.issueId) {
+    return `${entry.workflowName}--${entry.issueId.replace(/[^a-zA-Z0-9._-]+/g, "_")}.log`;
+  }
+  return `${entry.workflowName}.log`;
+}
+
 export default async function ObservePage(props: { searchParams: SearchParamsShape }) {
   const searchParams = await props.searchParams;
   const selectedProjectKey = firstString(searchParams.project);
@@ -229,10 +243,13 @@ export default async function ObservePage(props: { searchParams: SearchParamsSha
   if (selectedAgent) {
     selectedRun = await getRun(selectedAgent.runId);
     const logs = await listRunLogs(selectedAgent.runId);
-    const exactLogName = `${selectedAgent.workflowName}.log`;
+    const exactLogName = expectedLogNameForEntry(selectedAgent);
     expectedLogName = exactLogName;
     const preferredLog =
       logs.find((log) => log.name === exactLogName) ??
+      (selectedAgent.kind === "issue"
+        ? logs.find((log) => log.name.startsWith(`${selectedAgent.workflowName}--`))
+        : null) ??
       logs.sort((left, right) => new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime())[0];
 
     if (preferredLog) {

@@ -108,6 +108,10 @@ export function createRunsController(deps: {
       summary: reason,
       audit_artifact_name: currentBuildState?.audit_artifact_name,
     });
+    await runStore.updateRun(runId, {
+      status: "failed",
+      current_step: "build",
+    });
   }
 
   async function assertArchitectureClarificationsResolved(runId: string) {

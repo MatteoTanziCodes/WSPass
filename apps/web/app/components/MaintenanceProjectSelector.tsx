@@ -39,11 +39,29 @@ function describeArc(
   startAngle: number,
   endAngle: number
 ) {
+  const sweep = endAngle - startAngle;
+  if (sweep >= 359.999) {
+    const topOuter = polarToCartesian(cx, cy, outerRadius, 0);
+    const bottomOuter = polarToCartesian(cx, cy, outerRadius, 180);
+    const topInner = polarToCartesian(cx, cy, innerRadius, 0);
+    const bottomInner = polarToCartesian(cx, cy, innerRadius, 180);
+
+    return [
+      `M ${topOuter.x} ${topOuter.y}`,
+      `A ${outerRadius} ${outerRadius} 0 1 0 ${bottomOuter.x} ${bottomOuter.y}`,
+      `A ${outerRadius} ${outerRadius} 0 1 0 ${topOuter.x} ${topOuter.y}`,
+      `L ${topInner.x} ${topInner.y}`,
+      `A ${innerRadius} ${innerRadius} 0 1 1 ${bottomInner.x} ${bottomInner.y}`,
+      `A ${innerRadius} ${innerRadius} 0 1 1 ${topInner.x} ${topInner.y}`,
+      "Z",
+    ].join(" ");
+  }
+
   const startOuter = polarToCartesian(cx, cy, outerRadius, endAngle);
   const endOuter = polarToCartesian(cx, cy, outerRadius, startAngle);
   const startInner = polarToCartesian(cx, cy, innerRadius, endAngle);
   const endInner = polarToCartesian(cx, cy, innerRadius, startAngle);
-  const largeArcFlag = endAngle - startAngle > 180 ? 1 : 0;
+  const largeArcFlag = sweep > 180 ? 1 : 0;
 
   return [
     `M ${startOuter.x} ${startOuter.y}`,
@@ -315,6 +333,33 @@ export function MaintenanceProjectSelector(props: { projects: MaintenanceProject
           <span>Actions</span>
         </div>
 
+        <div className="grid gap-4 border-b border-[color:var(--line)] px-4 py-4 md:grid-cols-3">
+          <div className="border border-[color:var(--line)] bg-[color:var(--panel-soft)] px-4 py-3">
+            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)]">
+              Filtered projects
+            </p>
+            <p className="mt-2 text-2xl font-semibold text-[color:var(--ink-strong)]">
+              {filteredProjects.length}
+            </p>
+          </div>
+          <div className="border border-[color:var(--line)] bg-[color:var(--panel-soft)] px-4 py-3">
+            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)]">
+              Re-runnable
+            </p>
+            <p className="mt-2 text-2xl font-semibold text-[color:var(--ink-strong)]">
+              {filteredProjects.filter((project) => project.rerunnable).length}
+            </p>
+          </div>
+          <div className="border border-[color:var(--line)] bg-[color:var(--panel-soft)] px-4 py-3">
+            <p className="font-mono text-[11px] uppercase tracking-[0.18em] text-[color:var(--muted)]">
+              Active filter
+            </p>
+            <p className="mt-2 text-sm font-semibold uppercase tracking-[0.12em] text-[color:var(--ink-strong)]">
+              {effectiveBucket === "all" ? "All projects" : bucketMeta(effectiveBucket).label}
+            </p>
+          </div>
+        </div>
+
         {filteredProjects.map((project) => (
           <div
             key={project.key}
@@ -329,6 +374,9 @@ export function MaintenanceProjectSelector(props: { projects: MaintenanceProject
               </p>
               <p className="mt-1 font-mono text-[11px] uppercase tracking-[0.14em] text-[color:var(--muted)]">
                 latest {project.latestUpdatedAt}
+              </p>
+              <p className="mt-2 text-sm leading-6 text-[color:var(--ink)]">
+                {project.bucketLabel}
               </p>
             </Link>
             <div className="font-mono text-sm text-[color:var(--ink)]">{project.runsCount}</div>

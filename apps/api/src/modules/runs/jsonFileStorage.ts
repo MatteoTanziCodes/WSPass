@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 
 /**
@@ -21,7 +21,7 @@ export async function readJson<T>(filePath: string, schema: z.ZodType<T>): Promi
 
 // Writes a file via temp + rename so updates are atomic (prevents partial writes).
 async function atomicWriteFile(filePath: string, contents: string): Promise<void> {
-  const tmpPath = `${filePath}.tmp`;
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
   await fs.writeFile(tmpPath, contents, "utf8");
 
   try {

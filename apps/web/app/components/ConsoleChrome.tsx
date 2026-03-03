@@ -3,6 +3,7 @@ import { LiveRefreshShell } from "./LiveRefreshShell";
 import { StatusBadge } from "./StatusBadge";
 import {
   buildProgressItems,
+  deriveLiveExecution,
   deriveRunDisplayStatus,
   deriveRunDisplayTone,
   type RunEnvelope,
@@ -49,9 +50,10 @@ export function ConsoleChrome(props: {
   const { run, projectLabel, children } = props;
   const progress = buildProgressItems(run);
   const displayStatus = deriveRunDisplayStatus(run);
-  const executionLabel = run.execution?.backend
-    ? `${run.execution.backend}:${run.execution.workflow_name}`
-    : "idle";
+  const liveExecution = deriveLiveExecution(run);
+  const executionLabel = liveExecution?.backend
+    ? `${liveExecution.backend}:${liveExecution.workflowName}`
+    : liveExecution?.workflowName ?? "idle";
 
   return (
     <div className="min-h-screen bg-[color:var(--bg)] text-[color:var(--ink)]">
@@ -76,9 +78,9 @@ export function ConsoleChrome(props: {
               <StatusBadge
                 label={executionLabel}
                 tone={
-                  run.execution?.status === "failed"
+                  liveExecution?.status === "failed"
                     ? "danger"
-                    : run.execution?.status === "succeeded"
+                    : liveExecution?.status === "succeeded"
                     ? "success"
                     : "default"
                 }
@@ -135,8 +137,8 @@ export function ConsoleChrome(props: {
 
       <main className="mx-auto max-w-[1800px] px-4 py-6 lg:px-8">
         <LiveRefreshShell
-          executionStatus={run.execution?.status}
-          workflowName={run.execution?.workflow_name}
+          executionStatus={liveExecution?.status}
+          workflowName={liveExecution?.workflowName}
         >
           <div>{children}</div>
         </LiveRefreshShell>

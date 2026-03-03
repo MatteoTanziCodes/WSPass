@@ -31,6 +31,105 @@ function isActiveExecutionStatus(status?: string) {
   return status === "queued" || status === "dispatched" || status === "running";
 }
 
+export function hasActiveIssueWorkerState(
+  run: Pick<RunListItem, "build_state">
+) {
+  return (run.build_state?.issues ?? []).some((issue) =>
+    ["gathering_requirements", "working", "testing", "fixing"].includes(issue.status)
+  );
+}
+
+function hasQueuedOrReadyIssueWorkerState(run: Pick<RunListItem, "build_state">) {
+  return (run.build_state?.issues ?? []).some((issue) =>
+    ["queued", "ready", "pr_open"].includes(issue.status)
+  );
+}
+
+export function isStaleLocalWorkflowDispatch(
+  execution:
+    | Pick<
+        NonNullable<RunListItem["execution"]>,
+        "backend" | "workflow_name" | "status" | "requested_at" | "started_at" | "completed_at"
+      >
+    | undefined,
+  workflowNames?: string[]
+) {
+  if (!execution) {
+    return false;
+  }
+
+  if (
+    execution.backend !== "local_process" ||
+    !isActiveExecutionStatus(execution.status) ||
+    (workflowNames && !workflowNames.includes(execution.workflow_name))
+  ) {
+    return false;
+  }
+
+  const lastActivity =
+    execution.started_at ?? execution.requested_at ?? execution.completed_at;
+  if (!lastActivity) {
+    return false;
+  }
+
+  return Date.now() - new Date(lastActivity).getTime() > 30_000;
+}
+
+function isActiveBuildExecution(run: Pick<RunListItem, "execution">) {
+  return (
+    isActiveExecutionStatus(run.execution?.status) &&
+    run.execution?.workflow_name === "phase3-build-orchestrator" &&
+    !isStaleLocalWorkflowDispatch(run.execution, ["phase3-build-orchestrator"])
+  );
+}
+
+function isBuildInFlight(run: Pick<RunListItem, "execution" | "build_state">) {
+  return (
+    isActiveBuildExecution(run) ||
+    ((run.build_state?.status === "planning" || run.build_state?.status === "running") &&
+      (hasActiveIssueWorkerState(run) || hasQueuedOrReadyIssueWorkerState(run))) ||
+    hasActiveIssueWorkerState(run)
+  );
+}
+
+export function deriveLiveExecution(
+  run: Pick<RunListItem, "execution" | "build_state">
+) {
+  if (
+    isActiveBuildExecution(run) &&
+    run.execution?.workflow_name &&
+    run.execution?.status
+  ) {
+    return {
+      workflowName: run.execution.workflow_name,
+      status: run.execution.status,
+      backend: run.execution.backend,
+    };
+  }
+
+  if (
+    isActiveExecutionStatus(run.execution?.status) &&
+    run.execution?.workflow_name &&
+    !isStaleLocalWorkflowDispatch(run.execution)
+  ) {
+    return {
+      workflowName: run.execution.workflow_name,
+      status: run.execution.status,
+      backend: run.execution.backend,
+    };
+  }
+
+  if (hasActiveIssueWorkerState(run)) {
+    return {
+      workflowName: "phase3-issue-execution",
+      status: "running",
+      backend: run.execution?.backend,
+    };
+  }
+
+  return null;
+}
+
 const WORKFLOW_STATUS_LABELS: Partial<
   Record<
     NonNullable<RunListItem["execution"]>["workflow_name"],
@@ -49,17 +148,27 @@ const DISPLAY_STATUS_LABELS: Partial<Record<RunListItem["status"], string>> = {
   exported: "issues_synced",
 };
 
-function hasRunFailure(run: Pick<RunListItem, "status" | "execution">) {
+function hasRunFailure(run: Pick<RunListItem, "status" | "execution" | "build_state">) {
+  if (isActiveBuildExecution(run)) {
+    return false;
+  }
+
   return (
     run.execution?.status === "failed" ||
+    run.build_state?.status === "failed" ||
+    run.build_state?.status === "blocked" ||
     run.status === "failed" ||
     run.status === "review_blocked"
   );
 }
 
 export function deriveRunHealthBucket(
-  run: Pick<RunListItem, "status" | "execution">
+  run: Pick<RunListItem, "status" | "execution" | "build_state">
 ): RunHealthBucket {
+  if (isBuildInFlight(run) || Boolean(deriveLiveExecution(run))) {
+    return "yellow";
+  }
+
   if (hasRunFailure(run)) {
     return "red";
   }
@@ -85,7 +194,21 @@ export function deriveRunHealthBucket(
   return "green";
 }
 
-export function deriveRunDisplayStatus(run: Pick<RunListItem, "status" | "execution">) {
+export function deriveRunDisplayStatus(
+  run: Pick<RunListItem, "status" | "execution" | "build_state">
+) {
+  if (isBuildInFlight(run) || Boolean(deriveLiveExecution(run))) {
+    return "running";
+  }
+
+  if (run.build_state?.status === "failed") {
+    return "build_failed";
+  }
+
+  if (run.build_state?.status === "blocked") {
+    return "build_blocked";
+  }
+
   if (isActiveExecutionStatus(run.execution?.status)) {
     return "running";
   }
@@ -98,7 +221,7 @@ export function deriveRunDisplayStatus(run: Pick<RunListItem, "status" | "execut
 }
 
 export function deriveRunDisplayTone(
-  run: Pick<RunListItem, "status" | "execution">
+  run: Pick<RunListItem, "status" | "execution" | "build_state">
 ): StatusTone {
   const bucket = deriveRunHealthBucket(run);
   return bucket === "red" ? "danger" : bucket === "yellow" ? "accent" : "success";
@@ -196,8 +319,10 @@ export function deriveRetryWorkflow(run: RetryableRunShape) {
   }
 }
 
-export function isFailedRunState(run: Pick<RunListItem, "status" | "execution">) {
-  if (isActiveExecutionStatus(run.execution?.status)) {
+export function isFailedRunState(
+  run: Pick<RunListItem, "status" | "execution" | "build_state">
+) {
+  if (isBuildInFlight(run) || Boolean(deriveLiveExecution(run))) {
     return false;
   }
 
@@ -291,9 +416,11 @@ export function deriveGates(
   hasArchitecturePack: boolean,
   hasDecompositionPlan: boolean
 ) {
-  const execActive = ["queued", "dispatched", "running"].includes(
-    run.run.execution?.status ?? ""
-  );
+  const execActive =
+    (isActiveExecutionStatus(run.run.execution?.status) &&
+      run.run.execution?.workflow_name !== "phase3-issue-execution" &&
+      run.run.execution?.workflow_name !== "phase3-pr-supervisor") ||
+    hasActiveIssueWorkerState(run.run);
   const repoResolved = Boolean(run.run.repo_state);
   const decompStatus = run.run.decomposition_state?.status;
   const reviewStatus = run.run.decomposition_review_state?.status ?? "not_started";
@@ -339,6 +466,7 @@ export function describeArchitectureBlock(
 export function buildProgressItems(run: RunEnvelope["run"]) {
   const runBasePath = `/projects/${run.run_id}`;
   const buildStateStatus = run.build_state?.status;
+  const buildExecutionActive = isBuildInFlight(run);
   const hasArchitecture =
     Boolean(run.step_timestamps.parse) ||
     Boolean(run.step_timestamps.plan) ||
@@ -416,7 +544,9 @@ export function buildProgressItems(run: RunEnvelope["run"]) {
       key: "decompose",
       label: "Decompose",
       href: `${runBasePath}/decompose`,
-      state: reviewBlocked || decomposeFailed
+      state: buildExecutionActive
+        ? ("completed" as const)
+        : reviewBlocked || decomposeFailed
         ? ("blocked" as const)
         : isReviewReadyStatus(run.decomposition_review_state?.status)
             ? ("completed" as const)
@@ -424,7 +554,9 @@ export function buildProgressItems(run: RunEnvelope["run"]) {
               ? ("active" as const)
               : ("pending" as const),
       detail:
-        isReviewReadyStatus(run.decomposition_review_state?.status)
+        buildExecutionActive
+          ? "Build-ready"
+          : isReviewReadyStatus(run.decomposition_review_state?.status)
           ? "Build-ready"
           : reviewBlocked || decomposeFailed
             ? "Action required"
@@ -438,14 +570,18 @@ export function buildProgressItems(run: RunEnvelope["run"]) {
       key: "build",
       label: "Build",
       href: `${runBasePath}/build`,
-      state: buildFailed || buildStateStatus === "blocked"
+      state: buildExecutionActive
+        ? ("active" as const)
+        : buildFailed || buildStateStatus === "blocked"
         ? ("blocked" as const)
         : buildStateStatus === "completed"
             ? ("completed" as const)
             : issuesSynced || buildInFlight
               ? ("active" as const)
               : ("pending" as const),
-      detail: buildFailed
+      detail: buildExecutionActive
+        ? "Execution running"
+        : buildFailed
         ? "Action required"
         : buildStateStatus === "completed"
           ? "Merged"

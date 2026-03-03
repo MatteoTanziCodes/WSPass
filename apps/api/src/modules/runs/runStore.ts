@@ -75,6 +75,105 @@ type UpdateExecutionPatch = {
   error_message?: string;
 };
 
+function summarizeBuildIssues(issues: IssueExecutionState[]) {
+  const counts = issues.reduce(
+    (acc, issue) => {
+      acc[issue.status] = (acc[issue.status] ?? 0) + 1;
+      return acc;
+    },
+    {} as Record<string, number>
+  );
+
+  return [
+    `queued=${counts.queued ?? 0}`,
+    `working=${counts.working ?? 0}`,
+    `pr_open=${counts.pr_open ?? 0}`,
+    `testing=${counts.testing ?? 0}`,
+    `blocked=${(counts.blocked_missing_tools ?? 0) + (counts.blocked_missing_context ?? 0) + (counts.commit_blocked ?? 0)}`,
+    `merged=${counts.merged ?? 0}`,
+    `failed=${counts.failed ?? 0}`,
+  ].join(" | ");
+}
+
+function reconcileBuildState(buildState: BuildOrchestrationState): BuildOrchestrationState {
+  const issues = buildState.issues;
+  const blockedIssues = issues.filter((issue) =>
+    ["blocked_missing_tools", "blocked_missing_context", "commit_blocked"].includes(issue.status)
+  );
+  const failedIssues = issues.filter((issue) => issue.status === "failed");
+  const activeIssues = issues.filter((issue) =>
+    ["gathering_requirements", "ready", "working", "pr_open", "testing", "fixing"].includes(
+      issue.status
+    )
+  );
+  const queuedIssues = issues.filter((issue) => issue.status === "queued");
+  const mergedCount = issues.filter((issue) => issue.status === "merged").length;
+  const summaryCounts = summarizeBuildIssues(issues);
+
+  if (issues.length > 0 && mergedCount === issues.length) {
+    return {
+      ...buildState,
+      status: "completed",
+      completed_at: buildState.completed_at ?? new Date().toISOString(),
+      blocked_reason: undefined,
+      summary: "All synced build issues have been merged.",
+    };
+  }
+
+  if (blockedIssues.length > 0) {
+    return {
+      ...buildState,
+      status: "blocked",
+      blocked_reason: blockedIssues[0]?.blocker_summary ?? buildState.blocked_reason,
+      summary: `Build orchestration paused. ${summaryCounts}`,
+    };
+  }
+
+  if (failedIssues.length > 0) {
+    return {
+      ...buildState,
+      status: "failed",
+      blocked_reason: failedIssues[0]?.blocker_summary ?? buildState.blocked_reason,
+      summary: `Build orchestration failed. ${summaryCounts}`,
+    };
+  }
+
+  if (activeIssues.length > 0 || queuedIssues.length > 0) {
+    return {
+      ...buildState,
+      status: "running",
+      blocked_reason: undefined,
+      summary: `Build orchestration running. ${summaryCounts}`,
+    };
+  }
+
+  return {
+    ...buildState,
+    blocked_reason: undefined,
+  };
+}
+
+function isStaleLocalExecution(execution?: RunExecution) {
+  if (!execution) {
+    return false;
+  }
+
+  if (
+    execution.backend !== "local_process" ||
+    !["queued", "dispatched", "running"].includes(execution.status)
+  ) {
+    return false;
+  }
+
+  const lastActivity =
+    execution.started_at ?? execution.requested_at ?? execution.completed_at;
+  if (!lastActivity) {
+    return false;
+  }
+
+  return Date.now() - new Date(lastActivity).getTime() > 30_000;
+}
+
 function toSafeFilename(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, "_");
 }
@@ -96,6 +195,7 @@ function assertCanMoveExecution(from: RunExecutionStatus, to: RunExecutionStatus
 export class RunStore {
   private readonly runsDir: string;
   private readonly indexPath: string;
+  private mutationQueue: Promise<void> = Promise.resolve();
 
   constructor(opts?: { runsDir?: string }) {
     const defaultRunsDir = path.resolve(__dirname, "../../../../../runs");
@@ -104,32 +204,49 @@ export class RunStore {
     this.indexPath = path.join(this.runsDir, "index.json");
   }
 
-  async createRun(input: PlannerRunInput): Promise<RunDetail> {
-    await ensureDir(this.runsDir);
-
-    const now = new Date().toISOString();
-    const run: RunDetail = RunDetailSchema.parse({
-      run_id: randomUUID(),
-      created_at: now,
-      status: "created",
-      current_step: "created",
-      last_updated_at: now,
-      step_timestamps: { created: now },
-      input,
+  private async enqueueMutation<T>(work: () => Promise<T>): Promise<T> {
+    const previous = this.mutationQueue;
+    let release!: () => void;
+    this.mutationQueue = new Promise<void>((resolve) => {
+      release = resolve;
     });
 
-    const runDir = this.getRunDir(run.run_id);
-    await ensureDir(path.join(runDir, "artifacts"));
-    await writeJsonAtomic(this.getRunPath(run.run_id), run);
+    await previous;
+    try {
+      return await work();
+    } finally {
+      release();
+    }
+  }
 
-    const index = await this.readOrInitIndex();
-    const nextRuns = sortRunsNewestFirst([
-      ...index.runs.filter((r) => r.run_id !== run.run_id),
-      this.toRunRecord(run),
-    ]);
+  async createRun(input: PlannerRunInput): Promise<RunDetail> {
+    return this.enqueueMutation(async () => {
+      await ensureDir(this.runsDir);
 
-    await writeJsonAtomic(this.indexPath, RunsIndexSchema.parse({ version: 1, runs: nextRuns }));
-    return run;
+      const now = new Date().toISOString();
+      const run: RunDetail = RunDetailSchema.parse({
+        run_id: randomUUID(),
+        created_at: now,
+        status: "created",
+        current_step: "created",
+        last_updated_at: now,
+        step_timestamps: { created: now },
+        input,
+      });
+
+      const runDir = this.getRunDir(run.run_id);
+      await ensureDir(path.join(runDir, "artifacts"));
+      await writeJsonAtomic(this.getRunPath(run.run_id), run);
+
+      const index = await this.readOrInitIndex();
+      const nextRuns = sortRunsNewestFirst([
+        ...index.runs.filter((r) => r.run_id !== run.run_id),
+        this.toRunRecord(run),
+      ]);
+
+      await writeJsonAtomic(this.indexPath, RunsIndexSchema.parse({ version: 1, runs: nextRuns }));
+      return run;
+    });
   }
 
   async listRuns(): Promise<RunRecord[]> {
@@ -184,21 +301,25 @@ export class RunStore {
   }
 
   async deleteRun(runId: string): Promise<void> {
-    await this.getRun(runId);
+    await this.enqueueMutation(async () => {
+      await this.getRun(runId);
 
-    await fs.rm(this.getRunDir(runId), { recursive: true, force: true });
+      await fs.rm(this.getRunDir(runId), { recursive: true, force: true });
 
-    const index = await this.readOrInitIndex();
-    const nextRuns = index.runs.filter((run) => run.run_id !== runId);
-    await writeJsonAtomic(this.indexPath, RunsIndexSchema.parse({ version: 1, runs: nextRuns }));
+      const index = await this.readOrInitIndex();
+      const nextRuns = index.runs.filter((run) => run.run_id !== runId);
+      await writeJsonAtomic(this.indexPath, RunsIndexSchema.parse({ version: 1, runs: nextRuns }));
+    });
   }
 
   async updateRun(runId: string, patch: UpdateRunPatch): Promise<RunDetail> {
-    const existing = await this.getRun(runId);
-    return this.persistRun({
-      ...existing,
-      ...patch,
-      step_timestamps: this.nextStepTimestamps(existing, patch.current_step),
+    return this.enqueueMutation(async () => {
+      const existing = await this.getRun(runId);
+      return this.persistRun({
+        ...existing,
+        ...patch,
+        step_timestamps: this.nextStepTimestamps(existing, patch.current_step),
+      });
     });
   }
 
@@ -207,26 +328,61 @@ export class RunStore {
     workflowName: WorkflowName,
     backend: RunExecutionBackend = "github_actions"
   ): Promise<RunDetail> {
-    const existing = await this.getRun(runId);
+    return this.enqueueMutation(async () => {
+      let existing = await this.getRun(runId);
 
-    if (!existing.input) {
-      throw new RunConflictError("Cannot dispatch a run without persisted planner input.");
-    }
+      if (!existing.input) {
+        throw new RunConflictError("Cannot dispatch a run without persisted planner input.");
+      }
 
-    const status = existing.execution?.status;
-    if (status && ["queued", "dispatched", "running"].includes(status)) {
-      throw new RunConflictError(`Run execution is already active: ${status}`);
-    }
+      const status = existing.execution?.status;
+      if (status && ["queued", "dispatched", "running"].includes(status)) {
+        if (isStaleLocalExecution(existing.execution)) {
+          const now = new Date().toISOString();
+          const staleExecution = existing.execution!;
+          existing = await this.persistRun({
+            ...existing,
+            execution: {
+              ...staleExecution,
+              status: "failed",
+              completed_at: now,
+              error_message: staleExecution.error_message ??
+                "Recovered stale local workflow execution before redispatch.",
+            },
+            build_state:
+              staleExecution.workflow_name === "phase3-build-orchestrator"
+                ? {
+                    status: "failed",
+                    started_at: existing.build_state?.started_at ?? now,
+                    completed_at: now,
+                    current_ring: existing.build_state?.current_ring ?? 0,
+                    max_parallel_workers: existing.build_state?.max_parallel_workers ?? 3,
+                    issues: existing.build_state?.issues ?? [],
+                    blocked_reason:
+                      staleExecution.error_message ??
+                      "Recovered stale local workflow execution before redispatch.",
+                    summary:
+                      staleExecution.error_message ??
+                      "Recovered stale local workflow execution before redispatch.",
+                    audit_artifact_name: existing.build_state?.audit_artifact_name,
+                  }
+                : existing.build_state,
+          });
+        } else {
+          throw new RunConflictError(`Run execution is already active: ${status}`);
+        }
+      }
 
-    const now = new Date().toISOString();
-    return this.persistRun({
-      ...existing,
-      execution: {
-        backend,
-        workflow_name: workflowName,
-        status: "queued",
-        requested_at: now,
-      },
+      const now = new Date().toISOString();
+      return this.persistRun({
+        ...existing,
+        execution: {
+          backend,
+          workflow_name: workflowName,
+          status: "queued",
+          requested_at: now,
+        },
+      });
     });
   }
 
@@ -250,32 +406,34 @@ export class RunStore {
   }
 
   async updateExecution(runId: string, patch: UpdateExecutionPatch): Promise<RunDetail> {
-    const existing = await this.getRun(runId);
-    const current = existing.execution;
+    return this.enqueueMutation(async () => {
+      const existing = await this.getRun(runId);
+      const current = existing.execution;
 
-    if (!current) {
-      throw new RunConflictError("Execution has not been created for this run.");
-    }
+      if (!current) {
+        throw new RunConflictError("Execution has not been created for this run.");
+      }
 
-    assertCanMoveExecution(current.status, patch.status);
+      assertCanMoveExecution(current.status, patch.status);
 
-    const now = new Date().toISOString();
-    const nextExecution: RunExecution = {
-      ...current,
-      ...patch,
-      workflow_name: patch.workflow_name ?? current.workflow_name,
-      started_at: patch.status === "running" ? current.started_at ?? now : current.started_at,
-      completed_at:
-        patch.status === "succeeded" || patch.status === "failed" ? now : current.completed_at,
-    };
+      const now = new Date().toISOString();
+      const nextExecution: RunExecution = {
+        ...current,
+        ...patch,
+        workflow_name: patch.workflow_name ?? current.workflow_name,
+        started_at: patch.status === "running" ? current.started_at ?? now : current.started_at,
+        completed_at:
+          patch.status === "succeeded" || patch.status === "failed" ? now : current.completed_at,
+      };
 
-    if (patch.status !== "failed") {
-      delete nextExecution.error_message;
-    }
+      if (patch.status !== "failed") {
+        delete nextExecution.error_message;
+      }
 
-    return this.persistRun({
-      ...existing,
-      execution: nextExecution,
+      return this.persistRun({
+        ...existing,
+        execution: nextExecution,
+      });
     });
   }
 
@@ -285,55 +443,57 @@ export class RunStore {
     payload: unknown,
     contentType: "application/json" | "text/plain" | "text/markdown" = "application/json"
   ): Promise<ArtifactMetadata> {
-    await this.getRun(runId);
+    return this.enqueueMutation(async () => {
+      await this.getRun(runId);
 
-    const artifactsDir = this.getArtifactsDir(runId);
-    await ensureDir(artifactsDir);
+      const artifactsDir = this.getArtifactsDir(runId);
+      await ensureDir(artifactsDir);
 
-    const safe = toSafeFilename(name) || "artifact";
-    const createdAt = new Date().toISOString();
+      const safe = toSafeFilename(name) || "artifact";
+      const createdAt = new Date().toISOString();
 
-    let filename: string;
-    let sha: string | undefined;
+      let filename: string;
+      let sha: string | undefined;
 
-    if (contentType === "application/json") {
-      filename = `${safe}.json`;
-      const text = JSON.stringify(payload, null, 2) + "\n";
-      sha = sha256Hex(text);
-      await writeTextAtomic(path.join(artifactsDir, filename), text);
-    } else {
-      filename = contentType === "text/markdown" ? `${safe}.md` : `${safe}.txt`;
-      const text = typeof payload === "string" ? payload : String(payload);
-      sha = sha256Hex(text);
-      await writeTextAtomic(path.join(artifactsDir, filename), text);
-    }
+      if (contentType === "application/json") {
+        filename = `${safe}.json`;
+        const text = JSON.stringify(payload, null, 2) + "\n";
+        sha = sha256Hex(text);
+        await writeTextAtomic(path.join(artifactsDir, filename), text);
+      } else {
+        filename = contentType === "text/markdown" ? `${safe}.md` : `${safe}.txt`;
+        const text = typeof payload === "string" ? payload : String(payload);
+        sha = sha256Hex(text);
+        await writeTextAtomic(path.join(artifactsDir, filename), text);
+      }
 
-    const meta: ArtifactMetadata = ArtifactMetadataSchema.parse({
-      name,
-      filename,
-      content_type: contentType,
-      sha256: sha,
-      created_at: createdAt,
-    });
+      const meta: ArtifactMetadata = ArtifactMetadataSchema.parse({
+        name,
+        filename,
+        content_type: contentType,
+        sha256: sha,
+        created_at: createdAt,
+      });
 
-    const index = await this.readOrInitArtifactsIndex(runId);
-    const nextArtifacts = [...index.artifacts.filter((a) => a.name !== name), meta].sort((a, b) =>
-      a.created_at !== b.created_at
-        ? a.created_at < b.created_at
-          ? 1
-          : -1
-        : a.name < b.name
-          ? -1
-          : a.name > b.name
+      const index = await this.readOrInitArtifactsIndex(runId);
+      const nextArtifacts = [...index.artifacts.filter((a) => a.name !== name), meta].sort((a, b) =>
+        a.created_at !== b.created_at
+          ? a.created_at < b.created_at
             ? 1
-            : 0
-    );
+            : -1
+          : a.name < b.name
+            ? -1
+            : a.name > b.name
+              ? 1
+              : 0
+      );
 
-    await writeJsonAtomic(
-      this.getArtifactsIndexPath(runId),
-      ArtifactsIndexSchema.parse({ version: 1, artifacts: nextArtifacts })
-    );
-    return meta;
+      await writeJsonAtomic(
+        this.getArtifactsIndexPath(runId),
+        ArtifactsIndexSchema.parse({ version: 1, artifacts: nextArtifacts })
+      );
+      return meta;
+    });
   }
 
   async listArtifacts(runId: string): Promise<ArtifactMetadata[]> {
@@ -411,18 +571,22 @@ export class RunStore {
     runId: string,
     implementationState: ImplementationIssueStateCollection
   ): Promise<RunDetail> {
-    const existing = await this.getRun(runId);
-    return this.persistRun({
-      ...existing,
-      implementation_state: implementationState,
+    return this.enqueueMutation(async () => {
+      const existing = await this.getRun(runId);
+      return this.persistRun({
+        ...existing,
+        implementation_state: implementationState,
+      });
     });
   }
 
   async updateBuildState(runId: string, buildState: BuildOrchestrationState): Promise<RunDetail> {
-    const existing = await this.getRun(runId);
-    return this.persistRun({
-      ...existing,
-      build_state: buildState,
+    return this.enqueueMutation(async () => {
+      const existing = await this.getRun(runId);
+      return this.persistRun({
+        ...existing,
+        build_state: buildState,
+      });
     });
   }
 
@@ -431,23 +595,25 @@ export class RunStore {
     issueId: string,
     issueState: IssueExecutionState
   ): Promise<RunDetail> {
-    const existing = await this.getRun(runId);
-    const currentBuildState = existing.build_state;
-    if (!currentBuildState) {
-      throw new RunConflictError("Build state has not been created for this run.");
-    }
+    return this.enqueueMutation(async () => {
+      const existing = await this.getRun(runId);
+      const currentBuildState = existing.build_state;
+      if (!currentBuildState) {
+        throw new RunConflictError("Build state has not been created for this run.");
+      }
 
-    const nextIssues = [
-      ...currentBuildState.issues.filter((issue) => issue.issue_id !== issueId),
-      issueState,
-    ].sort((left, right) => left.issue_id.localeCompare(right.issue_id));
+      const nextIssues = [
+        ...currentBuildState.issues.filter((issue) => issue.issue_id !== issueId),
+        issueState,
+      ].sort((left, right) => left.issue_id.localeCompare(right.issue_id));
 
-    return this.persistRun({
-      ...existing,
-      build_state: {
-        ...currentBuildState,
-        issues: nextIssues,
-      },
+      return this.persistRun({
+        ...existing,
+        build_state: reconcileBuildState({
+          ...currentBuildState,
+          issues: nextIssues,
+        }),
+      });
     });
   }
 
@@ -456,27 +622,67 @@ export class RunStore {
     issueId: string,
     requirements: Array<{ id: string; status: "open" | "provided" | "resolved"; resolved_at?: string }>
   ): Promise<RunDetail> {
-    const existing = await this.getRun(runId);
-    const currentBuildState = existing.build_state;
-    if (!currentBuildState) {
-      throw new RunConflictError("Build state has not been created for this run.");
-    }
+    return this.enqueueMutation(async () => {
+      const existing = await this.getRun(runId);
+      const currentBuildState = existing.build_state;
+      if (!currentBuildState) {
+        throw new RunConflictError("Build state has not been created for this run.");
+      }
 
-    const targetIssue = currentBuildState.issues.find((issue) => issue.issue_id === issueId);
-    if (!targetIssue) {
-      throw new RunConflictError(`Build issue state not found for run ${runId}: ${issueId}`);
-    }
+      const targetIssue = currentBuildState.issues.find((issue) => issue.issue_id === issueId);
+      if (!targetIssue) {
+        throw new RunConflictError(`Build issue state not found for run ${runId}: ${issueId}`);
+      }
 
-    const nextIssue: IssueExecutionState = {
-      ...targetIssue,
-      secret_requirements: targetIssue.secret_requirements.map((requirement) => {
+      const nextRequirements = targetIssue.secret_requirements.map((requirement) => {
         const patch = requirements.find((candidate) => candidate.id === requirement.id);
         return patch ? { ...requirement, status: patch.status, resolved_at: patch.resolved_at } : requirement;
-      }),
-      last_updated_at: new Date().toISOString(),
-    };
+      });
 
-    return this.updateIssueExecutionState(runId, issueId, nextIssue);
+      const unresolvedRequirements = nextRequirements.filter(
+        (requirement) => requirement.status !== "resolved"
+      );
+      const unresolvedQuestions = targetIssue.context_questions.filter(
+        (question) => question.status === "open"
+      );
+
+      const nextIssue: IssueExecutionState = {
+        ...targetIssue,
+        status:
+          unresolvedRequirements.length === 0 && unresolvedQuestions.length === 0
+            ? "ready"
+            : targetIssue.status,
+        secret_requirements: nextRequirements,
+        blocker_summary:
+          unresolvedRequirements.length === 0 && unresolvedQuestions.length === 0
+            ? undefined
+            : targetIssue.blocker_summary,
+        last_updated_at: new Date().toISOString(),
+      };
+
+      const nextIssues = [
+        ...currentBuildState.issues.filter((issue) => issue.issue_id !== issueId),
+        nextIssue,
+      ].sort((left, right) => left.issue_id.localeCompare(right.issue_id));
+
+      const stillBlocked = nextIssues.some((issue) =>
+        ["blocked_missing_tools", "blocked_missing_context", "commit_blocked", "failed"].includes(
+          issue.status
+        )
+      );
+
+      return this.persistRun({
+        ...existing,
+        build_state: reconcileBuildState({
+          ...currentBuildState,
+          summary:
+            currentBuildState.status === "blocked" && !stillBlocked
+              ? "Build orchestration resumed after requirement resolution."
+              : currentBuildState.summary,
+          issues: nextIssues,
+        }),
+      });
+    });
   }
 
   async answerIssueContextQuestions(
@@ -489,20 +695,19 @@ export class RunStore {
       answered_at?: string;
     }>
   ): Promise<RunDetail> {
-    const existing = await this.getRun(runId);
-    const currentBuildState = existing.build_state;
-    if (!currentBuildState) {
-      throw new RunConflictError("Build state has not been created for this run.");
-    }
+    return this.enqueueMutation(async () => {
+      const existing = await this.getRun(runId);
+      const currentBuildState = existing.build_state;
+      if (!currentBuildState) {
+        throw new RunConflictError("Build state has not been created for this run.");
+      }
 
-    const targetIssue = currentBuildState.issues.find((issue) => issue.issue_id === issueId);
-    if (!targetIssue) {
-      throw new RunConflictError(`Build issue state not found for run ${runId}: ${issueId}`);
-    }
+      const targetIssue = currentBuildState.issues.find((issue) => issue.issue_id === issueId);
+      if (!targetIssue) {
+        throw new RunConflictError(`Build issue state not found for run ${runId}: ${issueId}`);
+      }
 
-    const nextIssue: IssueExecutionState = {
-      ...targetIssue,
-      context_questions: targetIssue.context_questions.map((question) => {
+      const nextQuestions = targetIssue.context_questions.map((question) => {
         const patch = questions.find((candidate) => candidate.id === question.id);
         return patch
           ? {
@@ -512,34 +717,79 @@ export class RunStore {
               answered_at: patch.answered_at,
             }
           : question;
-      }),
-      last_updated_at: new Date().toISOString(),
-    };
+      });
 
-    return this.updateIssueExecutionState(runId, issueId, nextIssue);
+      const unresolvedQuestions = nextQuestions.filter((question) => question.status === "open");
+      const unresolvedRequirements = targetIssue.secret_requirements.filter(
+        (requirement) => requirement.status !== "resolved"
+      );
+
+      const nextIssue: IssueExecutionState = {
+        ...targetIssue,
+        status:
+          unresolvedQuestions.length === 0 && unresolvedRequirements.length === 0
+            ? "ready"
+            : targetIssue.status,
+        context_questions: nextQuestions,
+        blocker_summary:
+          unresolvedQuestions.length === 0 && unresolvedRequirements.length === 0
+            ? undefined
+            : targetIssue.blocker_summary,
+        last_updated_at: new Date().toISOString(),
+      };
+
+      const nextIssues = [
+        ...currentBuildState.issues.filter((issue) => issue.issue_id !== issueId),
+        nextIssue,
+      ].sort((left, right) => left.issue_id.localeCompare(right.issue_id));
+
+      const stillBlocked = nextIssues.some((issue) =>
+        ["blocked_missing_tools", "blocked_missing_context", "commit_blocked", "failed"].includes(
+          issue.status
+        )
+      );
+
+      return this.persistRun({
+        ...existing,
+        build_state: reconcileBuildState({
+          ...currentBuildState,
+          summary:
+            currentBuildState.status === "blocked" && !stillBlocked
+              ? "Build orchestration resumed after context was provided."
+              : currentBuildState.summary,
+          issues: nextIssues,
+        }),
+      });
+    });
   }
 
   async updateRepoState(runId: string, repoState: RepoState): Promise<RunDetail> {
-    const existing = await this.getRun(runId);
-    return this.persistRun({
-      ...existing,
-      repo_state: repoState,
+    return this.enqueueMutation(async () => {
+      const existing = await this.getRun(runId);
+      return this.persistRun({
+        ...existing,
+        repo_state: repoState,
+      });
     });
   }
 
   async updateArchitectureChat(runId: string, architectureChat: ArchitectureChatState): Promise<RunDetail> {
-    const existing = await this.getRun(runId);
-    return this.persistRun({
-      ...existing,
-      architecture_chat: architectureChat,
+    return this.enqueueMutation(async () => {
+      const existing = await this.getRun(runId);
+      return this.persistRun({
+        ...existing,
+        architecture_chat: architectureChat,
+      });
     });
   }
 
   async updateDecompositionState(runId: string, decompositionState: DecompositionState): Promise<RunDetail> {
-    const existing = await this.getRun(runId);
-    return this.persistRun({
-      ...existing,
-      decomposition_state: decompositionState,
+    return this.enqueueMutation(async () => {
+      const existing = await this.getRun(runId);
+      return this.persistRun({
+        ...existing,
+        decomposition_state: decompositionState,
+      });
     });
   }
 
@@ -547,10 +797,12 @@ export class RunStore {
     runId: string,
     decompositionReviewState: DecompositionReviewState
   ): Promise<RunDetail> {
-    const existing = await this.getRun(runId);
-    return this.persistRun({
-      ...existing,
-      decomposition_review_state: decompositionReviewState,
+    return this.enqueueMutation(async () => {
+      const existing = await this.getRun(runId);
+      return this.persistRun({
+        ...existing,
+        decomposition_review_state: decompositionReviewState,
+      });
     });
   }
 
@@ -558,87 +810,89 @@ export class RunStore {
     runId: string,
     answer: DecompositionReviewQuestionAnswerRequest
   ): Promise<RunDetail> {
-    const existing = await this.getRun(runId);
-    const reviewState = existing.decomposition_review_state;
+    return this.enqueueMutation(async () => {
+      const existing = await this.getRun(runId);
+      const reviewState = existing.decomposition_review_state;
 
-    if (!reviewState) {
-      throw new RunConflictError("Decomposition review state has not been created for this run.");
-    }
+      if (!reviewState) {
+        throw new RunConflictError("Decomposition review state has not been created for this run.");
+      }
 
-    const now = new Date().toISOString();
-    const updatedQuestions = [...reviewState.questions];
-    const targetQuestionId = answer.question_id?.trim();
-    const targetGapId = answer.gap_id?.trim();
+      const now = new Date().toISOString();
+      const updatedQuestions = [...reviewState.questions];
+      const targetQuestionId = answer.question_id?.trim();
+      const targetGapId = answer.gap_id?.trim();
 
-    let targetIndex = targetQuestionId
-      ? updatedQuestions.findIndex((question) => question.id === targetQuestionId)
-      : -1;
+      let targetIndex = targetQuestionId
+        ? updatedQuestions.findIndex((question) => question.id === targetQuestionId)
+        : -1;
 
-    if (targetIndex === -1 && targetGapId) {
-      targetIndex = updatedQuestions.findIndex((question) =>
-        question.derived_from_gap_ids.includes(targetGapId)
-      );
-    }
-
-    if (targetIndex >= 0) {
-      updatedQuestions[targetIndex] = {
-        ...updatedQuestions[targetIndex],
-        status: "answered",
-        answer: answer.answer,
-        answered_at: now,
-      };
-    } else if (targetGapId) {
-      const reviewArtifact = await this.readArtifact(runId, "decomposition_review");
-      const parsedReview = DecompositionReviewArtifactSchema.parse(
-        reviewArtifact.payload
-      ) as DecompositionReviewArtifact;
-      const targetGap = parsedReview.gaps.find((gap) => gap.id === targetGapId);
-
-      if (!targetGap) {
-        throw new RunConflictError(
-          `Decomposition review gap not found for run ${runId}: ${targetGapId}`
+      if (targetIndex === -1 && targetGapId) {
+        targetIndex = updatedQuestions.findIndex((question) =>
+          question.derived_from_gap_ids.includes(targetGapId)
         );
       }
 
-      const synthesizedQuestion: DecompositionClarifyingQuestion =
-        DecompositionClarifyingQuestionSchema.parse({
-          id: `dq_gap_${targetGap.id}`,
-          prompt: `Resolve coverage gap: ${targetGap.summary}`,
-          rationale:
-            targetGap.why_blocked ??
-            targetGap.resolution_notes ??
-            "The iterator still needs this missing information before it can safely complete issue generation.",
+      if (targetIndex >= 0) {
+        updatedQuestions[targetIndex] = {
+          ...updatedQuestions[targetIndex],
           status: "answered",
           answer: answer.answer,
-          created_at: now,
           answered_at: now,
-          related_requirement_ids: targetGap.affected_requirement_ids,
-          related_components: targetGap.affected_components,
-          derived_from_gap_ids: [targetGap.id],
-          missing_information: targetGap.missing_information,
-          evidence: targetGap.evidence,
-          recommended_inputs: targetGap.recommended_inputs,
-          expected_issue_outcomes: targetGap.expected_issue_outcomes,
-        });
+        };
+      } else if (targetGapId) {
+        const reviewArtifact = await this.readArtifact(runId, "decomposition_review");
+        const parsedReview = DecompositionReviewArtifactSchema.parse(
+          reviewArtifact.payload
+        ) as DecompositionReviewArtifact;
+        const targetGap = parsedReview.gaps.find((gap) => gap.id === targetGapId);
 
-      updatedQuestions.push(synthesizedQuestion);
-    } else {
-      throw new RunConflictError(
-        `Decomposition review question not found for run ${runId}: ${targetQuestionId ?? "unknown"}`
-      );
-    }
+        if (!targetGap) {
+          throw new RunConflictError(
+            `Decomposition review gap not found for run ${runId}: ${targetGapId}`
+          );
+        }
 
-    return this.persistRun({
-      ...existing,
-      decomposition_review_state: {
-        ...reviewState,
-        status: "blocked",
-        questions: updatedQuestions,
-        open_question_count: updatedQuestions.filter((question) => question.status === "open").length,
-        blocked_reason: updatedQuestions.some((question) => question.status === "open")
-          ? reviewState.blocked_reason
-          : undefined,
-      },
+        const synthesizedQuestion: DecompositionClarifyingQuestion =
+          DecompositionClarifyingQuestionSchema.parse({
+            id: `dq_gap_${targetGap.id}`,
+            prompt: `Resolve coverage gap: ${targetGap.summary}`,
+            rationale:
+              targetGap.why_blocked ??
+              targetGap.resolution_notes ??
+              "The iterator still needs this missing information before it can safely complete issue generation.",
+            status: "answered",
+            answer: answer.answer,
+            created_at: now,
+            answered_at: now,
+            related_requirement_ids: targetGap.affected_requirement_ids,
+            related_components: targetGap.affected_components,
+            derived_from_gap_ids: [targetGap.id],
+            missing_information: targetGap.missing_information,
+            evidence: targetGap.evidence,
+            recommended_inputs: targetGap.recommended_inputs,
+            expected_issue_outcomes: targetGap.expected_issue_outcomes,
+          });
+
+        updatedQuestions.push(synthesizedQuestion);
+      } else {
+        throw new RunConflictError(
+          `Decomposition review question not found for run ${runId}: ${targetQuestionId ?? "unknown"}`
+        );
+      }
+
+      return this.persistRun({
+        ...existing,
+        decomposition_review_state: {
+          ...reviewState,
+          status: "blocked",
+          questions: updatedQuestions,
+          open_question_count: updatedQuestions.filter((question) => question.status === "open").length,
+          blocked_reason: updatedQuestions.some((question) => question.status === "open")
+            ? reviewState.blocked_reason
+            : undefined,
+        },
+      });
     });
   }
 
